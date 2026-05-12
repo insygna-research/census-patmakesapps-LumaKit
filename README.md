@@ -68,6 +68,25 @@ cp .env.example .env
 lumakit open
 ```
 
+## Connect Struqt
+
+LumaKit can connect to [Struqt](https://www.struqt.live), the desktop project TODO manager, through Struqt's local API. Struqt must be open on the same machine.
+
+1. Open Struqt.
+2. Click **LumaKit** in Struqt's title bar.
+3. Enable the local API.
+4. Open LumaKit with `lumakit open`.
+5. Ask LumaKit: `is Struqt connected?`
+
+After the connection is active, you can ask LumaKit to list Struqt projects, create projects, create tasks, or update tasks. For example:
+
+```text
+show my Struqt projects
+create a Struqt task called "Review launch checklist" in Launch
+```
+
+Note: Struqt is managed by Utility Tech LLC. The Struqt-side release that enables this integration has not shipped publicly yet, but support is planned.
+
 ## Recommended first-run model
 
 Today, the repo expects you to set your model explicitly via env vars. The main knob is:
