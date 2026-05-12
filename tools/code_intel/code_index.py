@@ -1,4 +1,5 @@
 import os
+import threading
 from pathlib import Path
 
 from tools.code_intel.cache import IndexCache, _hash_file
@@ -361,6 +362,129 @@ class CodeIndex:
             get_find_imports_tool(self),
             get_call_graph_tool(self),
         ]
+
+
+class LazyCodeIndex:
+    """Build CodeIndex only when a code-intel tool actually needs it."""
+
+    def __init__(self, root: Path, storage_manager=None, *, background: bool = False):
+        self.root = root
+        self._storage = storage_manager
+        self._index: CodeIndex | None = None
+        self._build_error: str | None = None
+        self._building = False
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        if background:
+            self.start_background_build()
+
+    def start_background_build(self) -> None:
+        with self._lock:
+            if self._index is not None or self._building:
+                return
+            self._building = True
+        thread = threading.Thread(target=self._build_in_background, daemon=True)
+        thread.start()
+
+    def _build_in_background(self) -> None:
+        self._build_index()
+
+    def _ensure_built(self) -> CodeIndex:
+        with self._lock:
+            if self._index is not None:
+                return self._index
+            while self._building:
+                self._condition.wait()
+                if self._index is not None:
+                    return self._index
+            if self._build_error:
+                raise RuntimeError(self._build_error)
+            self._building = True
+            self._build_error = None
+
+        return self._build_index()
+
+    def _build_index(self) -> CodeIndex:
+        try:
+            index = CodeIndex(root=self.root, storage_manager=self._storage)
+            index.build()
+        except Exception as exc:
+            with self._lock:
+                self._build_error = str(exc)
+                self._building = False
+                self._condition.notify_all()
+            raise
+
+        with self._lock:
+            self._index = index
+            self._building = False
+            self._condition.notify_all()
+            return index
+
+    def status(self) -> dict:
+        with self._lock:
+            if self._index is not None:
+                return {
+                    "state": "ready",
+                    "symbols": len(self._index.table.all_symbols()),
+                    "references": len(self._index.references),
+                    "error": None,
+                }
+            if self._building:
+                return {
+                    "state": "building",
+                    "symbols": None,
+                    "references": None,
+                    "error": None,
+                }
+            if self._build_error:
+                return {
+                    "state": "error",
+                    "symbols": None,
+                    "references": None,
+                    "error": self._build_error,
+                }
+            return {
+                "state": "lazy",
+                "symbols": None,
+                "references": None,
+                "error": None,
+            }
+
+    def get_tools(self) -> list[dict]:
+        return [
+            get_find_definition_tool(self),
+            get_find_usages_tool(self),
+            get_file_structure_tool(self),
+            get_search_symbols_tool(self),
+            get_find_imports_tool(self),
+            get_call_graph_tool(self),
+        ]
+
+    def update_file(self, file_path: str):
+        with self._lock:
+            index = self._index
+        if index is None:
+            return None
+        return index.update_file(file_path)
+
+    def find_definition(self, *args, **kwargs):
+        return self._ensure_built().find_definition(*args, **kwargs)
+
+    def find_usages(self, *args, **kwargs):
+        return self._ensure_built().find_usages(*args, **kwargs)
+
+    def get_file_structure(self, *args, **kwargs):
+        return self._ensure_built().get_file_structure(*args, **kwargs)
+
+    def search_symbols(self, *args, **kwargs):
+        return self._ensure_built().search_symbols(*args, **kwargs)
+
+    def find_imports(self, *args, **kwargs):
+        return self._ensure_built().find_imports(*args, **kwargs)
+
+    def get_call_graph(self, *args, **kwargs):
+        return self._ensure_built().get_call_graph(*args, **kwargs)
 
 
 # ======================================================================

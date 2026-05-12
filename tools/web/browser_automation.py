@@ -11,8 +11,6 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from playwright.sync_api import sync_playwright
-
 from core.display import status as report_status
 from core.interrupts import OperationInterrupted, raise_if_interrupted
 from core.paths import get_data_dir, get_repo_root
@@ -106,6 +104,8 @@ def _ensure_playwright_started():
     global _PLAYWRIGHT
     with _SESSIONS_LOCK:
         if _PLAYWRIGHT is None:
+            from playwright.sync_api import sync_playwright
+
             _PLAYWRIGHT = sync_playwright().start()
         return _PLAYWRIGHT
 

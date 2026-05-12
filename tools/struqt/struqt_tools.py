@@ -87,18 +87,6 @@ def get_struqt_connect_tool():
     }
 
 
-def get_struct_connect_tool():
-    tool = get_struqt_connect_tool()
-    return {
-        **tool,
-        "name": "struct_connect",
-        "description": (
-            "Alias for struqt_connect. Use when the user says Struct, STruqt, Strukt, struq, "
-            "or otherwise misspells Struqt while asking to connect or check setup."
-        ),
-    }
-
-
 def _connect(inputs: dict[str, Any]) -> dict[str, Any]:
     config = _load_config()
     details = {
@@ -153,18 +141,6 @@ def get_struqt_list_projects_tool():
     }
 
 
-def get_struct_list_projects_tool():
-    tool = get_struqt_list_projects_tool()
-    return {
-        **tool,
-        "name": "struct_list_projects",
-        "description": (
-            "Alias for struqt_list_projects. Use when the user says Struct/Strukt/struq "
-            "and wants projects from the Struqt TODO app."
-        ),
-    }
-
-
 def get_struqt_list_tasks_tool():
     return {
         "name": "struqt_list_tasks",
@@ -179,18 +155,6 @@ def get_struqt_list_tasks_tool():
             },
         },
         "execute": lambda inputs: _request("GET", "/v1/todos", params={"projectId": inputs.get("projectId")}),
-    }
-
-
-def get_struct_list_tasks_tool():
-    tool = get_struqt_list_tasks_tool()
-    return {
-        **tool,
-        "name": "struct_list_tasks",
-        "description": (
-            "Alias for struqt_list_tasks. Use when the user says Struct/Strukt/struq "
-            "and wants tasks from the Struqt TODO app."
-        ),
     }
 
 
@@ -212,18 +176,6 @@ def get_struqt_create_project_tool():
             "required": ["name"],
         },
         "execute": _create_project,
-    }
-
-
-def get_struct_create_project_tool():
-    tool = get_struqt_create_project_tool()
-    return {
-        **tool,
-        "name": "struct_create_project",
-        "description": (
-            "Alias for struqt_create_project. Use when the user says Struct/Strukt/struq "
-            "and wants to create a project in the Struqt TODO app."
-        ),
     }
 
 
@@ -265,18 +217,6 @@ def get_struqt_create_task_tool():
     }
 
 
-def get_struct_create_task_tool():
-    tool = get_struqt_create_task_tool()
-    return {
-        **tool,
-        "name": "struct_create_task",
-        "description": (
-            "Alias for struqt_create_task. Use when the user says Struct/Strukt/struq "
-            "and wants to create a task in the Struqt TODO app."
-        ),
-    }
-
-
 def _create_task(inputs: dict[str, Any]) -> dict[str, Any]:
     return _request(
         "POST",
@@ -309,18 +249,6 @@ def get_struqt_update_task_tool():
             "required": ["todoId"],
         },
         "execute": _update_task,
-    }
-
-
-def get_struct_update_task_tool():
-    tool = get_struqt_update_task_tool()
-    return {
-        **tool,
-        "name": "struct_update_task",
-        "description": (
-            "Alias for struqt_update_task. Use when the user says Struct/Strukt/struq "
-            "and wants to update a task in the Struqt TODO app."
-        ),
     }
 
 

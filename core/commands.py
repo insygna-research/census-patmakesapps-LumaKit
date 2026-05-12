@@ -136,8 +136,13 @@ def cmd_status(args: str, agent, session: dict):
         health["usage_percent"], health["total_display"], health["budget_display"]
     )
 
-    sym_count = len(agent.code_index.table.all_symbols())
-    ref_count = len(agent.code_index.references)
+    index_status = agent.get_code_index_status()
+    if index_status["state"] == "ready":
+        index_display = f"{index_status['symbols']} symbols, {index_status['references']} references"
+    elif index_status["state"] == "error":
+        index_display = f"error: {index_status['error']}"
+    else:
+        index_display = index_status["state"]
     msg_count = len(agent.messages)
     model = agent.model or "not set"
     fallback = agent.fallback_model or "not set"
@@ -152,7 +157,7 @@ def cmd_status(args: str, agent, session: dict):
   {_c(CYAN, 'Fallback:')}       {fallback}
   {_c(CYAN, 'Messages:')}       {msg_count} in current conversation
   {_c(CYAN, 'Saved chats:')}    {chat_count}
-  {_c(CYAN, 'Index:')}          {sym_count} symbols, {ref_count} references
+  {_c(CYAN, 'Index:')}          {index_display}
   {_c(CYAN, 'Chat ID:')}        {session.get('chat_id', 'none')}
 """)
 

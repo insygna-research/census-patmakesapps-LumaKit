@@ -15,20 +15,35 @@ load_dotenv()  # repo-root .env — won't override keys already set
 class ToolRegistry:
     def __init__(self):
         self.tools = {}
+        self.version = 0
 
-    def register(self, tool):
-        self.tools[tool['name']] = tool    
+    def register(self, tool, *, group=None, llm_exposed=None):
+        tool = dict(tool)
+        if group is not None:
+            tool.setdefault("group", group)
+        else:
+            tool.setdefault("group", "general")
+        if llm_exposed is not None:
+            tool["llm_exposed"] = bool(llm_exposed)
+        else:
+            tool.setdefault("llm_exposed", True)
+        self.tools[tool['name']] = tool
+        self.version += 1
 
     def get(self, name):
         return self.tools.get(name)
     
-    def list(self):
+    def list(self, *, groups=None, include_hidden=False):
+        group_filter = set(groups or [])
         return [
             {
                 'name': tool['name'],
-                'description': tool ['description']
+                'description': tool ['description'],
+                'group': tool.get('group', 'general'),
             }
             for tool in self.tools.values()
+            if (include_hidden or tool.get("llm_exposed", True))
+            and (not group_filter or tool.get("group") in group_filter)
         ]
     
     def validate_inputs(self, inputs, schema):
@@ -84,6 +99,15 @@ class ToolRegistry:
                 if attr_name.startswith('get_') and attr_name.endswith('_tool'):
                     tool_func = getattr(module, attr_name)
                     tool = tool_func()
-                    self.register(tool)
+                    self.register(tool, group=self._infer_group(module_path, base_path))
+
+    def _infer_group(self, module_path: Path, base_path: Path) -> str:
+        try:
+            rel_parts = module_path.relative_to(base_path).parts
+        except ValueError:
+            return "general"
+        if len(rel_parts) > 1:
+            return rel_parts[0]
+        return "general"
 
 

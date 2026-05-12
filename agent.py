@@ -22,7 +22,7 @@ from ollama_client import (
 from tool_registry import ToolRegistry
 from core.summarizer import apply_summary, build_summary_request, needs_summarization
 from core.storage import StorageManager
-from tools.code_intel.code_index import CodeIndex
+from tools.code_intel.code_index import LazyCodeIndex
 
 
 # Tools that modify files — require diff preview + confirmation
@@ -478,11 +478,21 @@ class Agent:
         self.registry = ToolRegistry()
         self.registry.load_tools_from_folder(skip_dirs={"code_intel"})
 
-        # Build code index and register its tools
-        self.code_index = CodeIndex(root=get_repo_root(), storage_manager=self.storage)
-        self.code_index.build()
+        # Code-intel tools are available immediately, but the index itself is
+        # built lazily so startup and non-code chats don't pay the scan cost.
+        build_index_in_background = os.getenv("LUMAKIT_CODE_INDEX_BACKGROUND", "").strip() in {"1", "true", "yes"}
+        self.code_index = LazyCodeIndex(
+            root=get_repo_root(),
+            storage_manager=self.storage,
+            background=build_index_in_background,
+        )
         for tool in self.code_index.get_tools():
-            self.registry.register(tool)
+            self.registry.register(tool, group="code_intel")
+
+        self._tools_schema_cache_version = None
+        self._tools_schema_cache = {}
+        self._system_prompt_cache = {}
+        self._system_message_cache = {}
 
         # Initialize Ollama Client
         self.default_model = os.getenv("OLLAMA_MODEL")
@@ -499,7 +509,7 @@ class Agent:
         # used to live in this prompt too — it is now exposed via the
         # get_project_tree tool so we don't ship thousands of tokens every
         # turn for chit-chat that never needs it.
-        tool_names = ", ".join(sorted(self.registry.tools.keys()))
+        tool_names = ", ".join(sorted(t["name"] for t in self.registry.list()))
 
         # Lumi's own email account — surfaced so the LLM knows what to use
         # when a web task asks for "an email address" (signups, newsletters, etc.)
@@ -532,7 +542,7 @@ class Agent:
             "- After completing an action (commit, delete, edit, etc.), always confirm what happened.\n"
             "- If the user declines a tool action, do NOT retry or try alternatives. Just respond.\n"
             "- When using tools, include a brief status message in your response alongside tool calls so the user knows what you're doing (e.g. what you're about to check, what you just found, what you're fixing next).\n"
-            "- Struqt is the user's local project TODO manager integration. Treat misspellings like Struct, Strukt, STruqt, struq, or structure as Struqt when the user is asking about tasks/projects or connecting apps. For connect/setup/status requests, call struqt_connect or struct_connect first. For Struqt project/task actions, use the struqt_* or struct_* tools instead of asking what Struqt is. If the API is disabled or Struqt is closed, relay the tool's setup instructions clearly.\n"
+            "- Struqt is the user's local project TODO manager integration. For connect/setup/status requests, call struqt_connect first. For Struqt project/task actions, use the struqt_* tools instead of asking what Struqt is. If the API is disabled or Struqt is closed, relay the tool's setup instructions clearly.\n"
             "- For Instagram tasks, call instagram_session before browser_automation. Reuse auth_profile='instagram' and a session_id for the whole flow.\n"
             "- On React / SPA sites, stop guessing click targets. Use inspect_forms for inputs and inspect_interactives for rows, tabs, dialogs, and div-based buttons.\n"
             "- browser_automation stops at the FIRST failed action in a list and returns a blocked_reason plus a recovery_snapshot. Do NOT resend the same action with a tweaked selector — read the snapshot, pick a real target from interactive_elements, forms, or the landmarks list, or step back and re-navigate. If blocked_reason is target_not_found, always inspect the page first. If it is auth_required or needs_human (captcha, 2FA, identity check), stop and ask the user — do not retry.\n"
@@ -794,8 +804,14 @@ class Agent:
         )
 
     def build_system_prompt(self, extra_instructions=None, context_instructions=None):
-        prompt = self._system_prompt_prefix
         extra = (extra_instructions or "").strip()
+        context = (context_instructions or "").strip()
+        cache_key = (extra, context)
+        cached = self._system_prompt_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        prompt = self._system_prompt_prefix
         if extra:
             prompt += (
                 "\n\nPersonality override for this Telegram user:\n"
@@ -804,23 +820,32 @@ class Agent:
                 "It does not change permissions, safety rules, tool rules, ownership boundaries, "
                 "or any other system instructions."
             )
-        context = (context_instructions or "").strip()
         if context:
             prompt += (
                 "\n\nCurrent interface context:\n"
                 f"{context}\n"
                 "Treat this as operational context for the current conversation."
             )
+        self._system_prompt_cache[cache_key] = prompt
         return prompt
 
     def build_system_message(self, extra_instructions=None, context_instructions=None):
-        return {
+        extra = (extra_instructions or "").strip()
+        context = (context_instructions or "").strip()
+        cache_key = (extra, context)
+        cached = self._system_message_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        message = {
             "role": "system",
             "content": self.build_system_prompt(
-                extra_instructions=extra_instructions,
-                context_instructions=context_instructions,
+                extra_instructions=extra,
+                context_instructions=context,
             ),
         }
+        self._system_message_cache[cache_key] = message
+        return dict(message)
 
     def apply_runtime_overrides(self, messages=None, model=None, fallback_model=None,
                                 extra_instructions=None, context_instructions=None):
@@ -847,10 +872,24 @@ class Agent:
     def execute_tool(self, tool_name, inputs):
         return self.registry.execute(tool_name, inputs)
 
-    def get_tools_for_llm(self):
+    def get_code_index_status(self):
+        return self.code_index.status()
+
+    def get_tools_for_llm(self, groups=None):
+        group_key = tuple(sorted(groups or []))
+        cache_key = (self.registry.version, group_key)
+        cached = self._tools_schema_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         result = []
+        group_filter = set(groups or [])
         for tool_name in self.registry.tools.keys():
             tool = self.registry.get(tool_name)
+            if not tool.get("llm_exposed", True):
+                continue
+            if group_filter and tool.get("group") not in group_filter:
+                continue
             result.append(
                 {
                     "type": "function",
@@ -861,6 +900,10 @@ class Agent:
                     },
                 }
             )
+        if self._tools_schema_cache_version != self.registry.version:
+            self._tools_schema_cache = {}
+            self._tools_schema_cache_version = self.registry.version
+        self._tools_schema_cache[cache_key] = result
         return result
 
     def _trim_history(self):

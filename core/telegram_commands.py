@@ -270,7 +270,13 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
 
     if cmd == "/status":
         health = agent.storage.check_health()
-        sym_count = len(agent.code_index.table.all_symbols())
+        index_status = agent.get_code_index_status()
+        if index_status["state"] == "ready":
+            index_display = f"{index_status['symbols']} symbols"
+        elif index_status["state"] == "error":
+            index_display = f"error: {index_status['error']}"
+        else:
+            index_display = index_status["state"]
         msg_count = len(agent.messages)
         model = agent.model or "not set"
         fallback = agent.fallback_model or "not set"
@@ -290,7 +296,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             f"Fallback: {fallback}\n"
             f"Messages: {msg_count} in current conversation\n"
             f"Saved chats: {chat_count}\n"
-            f"Index: {sym_count} symbols\n"
+            f"Index: {index_display}\n"
             f"Storage: {health['total_display']} / {health['budget_display']} "
             f"({health['usage_percent']:.0f}%)\n"
             f"Users: {user_count} authorized\n"
