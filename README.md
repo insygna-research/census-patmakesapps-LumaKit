@@ -85,6 +85,8 @@ show my Struqt projects
 create a Struqt task called "Review launch checklist" in Launch
 ```
 
+Note: Struqt is managed by Utility Tech LLC. The Struqt-side release that enables this integration has not shipped publicly yet, but support is planned.
+
 ## Recommended first-run model
 
 Today, the repo expects you to set your model explicitly via env vars. The main knob is:
