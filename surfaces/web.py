@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -27,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from agent import Agent
+from agent import Agent, timestamp_message
 from core import auth as _auth
 from core import email_draft_store
 from core.chat_store import (
@@ -54,12 +55,14 @@ from ollama_client import OllamaClient
 from tools.comms.email import send_preapproved
 from tools.comms.react import set_react_context
 from tools.memory.memory_tools import set_active_user as set_memory_active_user
+from tools.struqt.struqt_tools import _connect as struqt_connect, _request as struqt_request
 
 PORT = int(os.getenv("LUMAKIT_WEB_PORT", "7865"))
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = _REPO_ROOT / "web"
 WEB_MEDIA_DIR = get_data_dir() / "web_media"
 WEB_URL = f"http://localhost:{PORT}"
+STRUQT_TERM_RE = re.compile(r"\b(?:struqt|struct|strukt|struq|st?ruqt)\b", re.IGNORECASE)
 
 app = FastAPI(title="LumaKit")
 
@@ -146,6 +149,8 @@ async def health():
         "status": "ok",
         "model": cfg.get("primary_model") or "not configured",
         "setup_required": not bool(cfg.get("primary_model")),
+        "repo_root": str(_REPO_ROOT),
+        "struqt_tools": (_REPO_ROOT / "tools" / "struqt" / "struqt_tools.py").exists(),
     }
 
 
@@ -373,6 +378,54 @@ def _prepare_web_turn(agent: Agent, session: dict):
     set_interface("web", WEB_USER_ID)
     session["messages"] = agent.messages
     apply_user_runtime(agent, session, WEB_USER_ID, surface="web")
+
+
+def _format_struqt_connect_result(result: dict) -> str:
+    if result.get("connected"):
+        url = result.get("api_url") or "http://127.0.0.1:47321"
+        return f"Struqt is connected. Local API: `{url}`."
+
+    action = result.get("needs_action") or "Open Struqt, click LumaKit, and enable the local API."
+    return f"Struqt is not connected yet. {action}"
+
+
+def _format_struqt_projects(result: dict) -> str:
+    projects = result.get("projects") or []
+    if not projects:
+        return "Struqt is connected, but I do not see any projects yet."
+
+    lines = ["Struqt projects:"]
+    for project in projects[:20]:
+        archived = " archived" if project.get("isArchived") else ""
+        group = f" / {project.get('groupName')}" if project.get("groupName") else ""
+        lines.append(f"- {project.get('name', 'Untitled')}{group} `{project.get('id')}`{archived}")
+    if len(projects) > 20:
+        lines.append(f"- ...and {len(projects) - 20} more")
+    return "\n".join(lines)
+
+
+def _try_fast_struqt_intent(text: str) -> str | None:
+    normalized = " ".join(text.lower().split())
+    if not STRUQT_TERM_RE.search(normalized):
+        return None
+
+    wants_connect = any(word in normalized for word in (
+        "connect", "connected", "connection", "setup", "set up", "status", "enabled", "api"
+    ))
+    wants_projects = "project" in normalized and any(word in normalized for word in (
+        "list", "show", "see", "what", "which"
+    ))
+
+    if wants_projects:
+        setup = struqt_connect({})
+        if not setup.get("connected"):
+            return _format_struqt_connect_result(setup)
+        return _format_struqt_projects(struqt_request("GET", "/v1/projects"))
+
+    if wants_connect:
+        return _format_struqt_connect_result(struqt_connect({}))
+
+    return None
 
 
 def _register_web_client(user_id: str, send_fn):
@@ -815,6 +868,30 @@ async def websocket_chat(ws: WebSocket):
                     continue
                 if normalized in _EMAIL_DENY and email_draft_store.get_latest_pending():
                     await ws.send_json(_handle_email_draft_action("discard"))
+                    continue
+
+                fast_reply = _try_fast_struqt_intent(text)
+                if fast_reply is not None:
+                    user_message = timestamp_message({"role": "user", "content": text})
+                    assistant_message = timestamp_message({"role": "assistant", "content": fast_reply})
+                    agent.messages.extend([user_message, assistant_message])
+                    session["messages"] = agent.messages
+                    if not session["first_message_sent"]:
+                        session["title"] = make_title(text)
+                        session["first_message_sent"] = True
+                    save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
+                    set_active_chat(WEB_USER_ID, session["chat_id"])
+                    await ws.send_json({
+                        "type": "response",
+                        "text": fast_reply,
+                        "chat_id": session["chat_id"],
+                        "title": session["title"],
+                        "model_requested": agent.model,
+                        "model_used": "local-router",
+                        "run_state": "completed",
+                        "run_error": "",
+                        "streamed": False,
+                    })
                     continue
 
                 if agent_task and not agent_task.done():
