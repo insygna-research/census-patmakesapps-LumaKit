@@ -76,6 +76,8 @@ class ToolRegistry:
 
     def load_tools_from_folder(self, folder_path='tools', skip_dirs=None):
         base_path = Path(folder_path)
+        if not base_path.is_absolute():
+            base_path = Path(__file__).resolve().parent / base_path
         skip_dirs = set(skip_dirs or [])
 
         if not base_path.exists():

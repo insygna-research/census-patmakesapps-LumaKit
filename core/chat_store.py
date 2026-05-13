@@ -32,6 +32,15 @@ def _connect():
             updated_at TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS active_chat_scopes (
+            user_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, scope)
+        )
+    """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "owner_id" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN owner_id TEXT")
@@ -58,29 +67,42 @@ def _connect():
     return conn
 
 
-def set_active_chat(user_id: str, chat_id: str) -> None:
+def set_active_chat(user_id: str, chat_id: str, scope: str | None = None) -> None:
     """Mark this chat as the user's current active conversation."""
     if not user_id or not chat_id:
         return
     conn = _connect()
     now = datetime.now().isoformat()
-    conn.execute(
-        "INSERT INTO active_chats (user_id, chat_id, updated_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, updated_at = excluded.updated_at",
-        (str(user_id), str(chat_id), now),
-    )
+    if scope:
+        conn.execute(
+            "INSERT INTO active_chat_scopes (user_id, scope, chat_id, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, scope) DO UPDATE SET chat_id = excluded.chat_id, updated_at = excluded.updated_at",
+            (str(user_id), str(scope), str(chat_id), now),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO active_chats (user_id, chat_id, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, updated_at = excluded.updated_at",
+            (str(user_id), str(chat_id), now),
+        )
     conn.commit()
     conn.close()
 
 
-def get_active_chat(user_id: str) -> str | None:
+def get_active_chat(user_id: str, scope: str | None = None) -> str | None:
     """Return the user's current active chat id, or None if never set."""
     if not user_id:
         return None
     conn = _connect()
-    row = conn.execute(
-        "SELECT chat_id FROM active_chats WHERE user_id = ?", (str(user_id),)
-    ).fetchone()
+    if scope:
+        row = conn.execute(
+            "SELECT chat_id FROM active_chat_scopes WHERE user_id = ? AND scope = ?",
+            (str(user_id), str(scope)),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT chat_id FROM active_chats WHERE user_id = ?", (str(user_id),)
+        ).fetchone()
     conn.close()
     return row["chat_id"] if row else None
 

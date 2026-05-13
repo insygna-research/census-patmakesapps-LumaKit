@@ -14,8 +14,33 @@ from core.chat_store import get_active_chat, load_chat, make_title, new_chat_id,
 from core.cli import render_storage_meter
 from core.commands import handle_command
 from core.identity import CLI_USER_ID
+from core.paths import get_repo_root
 from core.service import LumaKitService, Surface
 from tools.memory.memory_tools import set_active_user as set_memory_active_user
+
+
+def _workspace_scope() -> str:
+    root = get_repo_root().resolve(strict=False)
+    return f"cli-workspace:{root}"
+
+
+def _refresh_workspace_system_message(agent: Agent, messages: list[dict]) -> list[dict]:
+    return agent.apply_runtime_overrides(messages=messages)
+
+
+def _save_session(agent: Agent, session: dict) -> None:
+    if session["first_message_sent"] and len(agent.messages) > 1:
+        save_chat(
+            session["chat_id"],
+            session["title"],
+            agent.messages,
+            owner_id=session.get("owner_id", CLI_USER_ID),
+        )
+        set_active_chat(
+            session.get("owner_id", CLI_USER_ID),
+            session["chat_id"],
+            scope=session.get("active_chat_scope"),
+        )
 
 
 def grab_clipboard_image():
@@ -73,17 +98,19 @@ def main(argv: list[str] | None = None):
     ))
     service.start()
 
+    workspace_scope = _workspace_scope()
     resumed = None
-    active_id = get_active_chat(CLI_USER_ID)
+    active_id = get_active_chat(CLI_USER_ID, scope=workspace_scope)
     if active_id:
         resumed = load_chat(active_id, owner_id=CLI_USER_ID)
     if resumed:
-        agent.messages = resumed["messages"]
+        agent.messages = _refresh_workspace_system_message(agent, resumed["messages"])
         session = {
             "chat_id": resumed["id"],
             "owner_id": CLI_USER_ID,
             "title": resumed["title"],
             "first_message_sent": True,
+            "active_chat_scope": workspace_scope,
         }
     else:
         session = {
@@ -91,31 +118,29 @@ def main(argv: list[str] | None = None):
             "owner_id": CLI_USER_ID,
             "title": "",
             "first_message_sent": False,
+            "active_chat_scope": workspace_scope,
         }
-    set_active_chat(CLI_USER_ID, session["chat_id"])
+    set_active_chat(CLI_USER_ID, session["chat_id"], scope=workspace_scope)
 
     print("\n=== LumaKit CLI ===")
     health = agent.storage.check_health()
     print(render_storage_meter(
         health["usage_percent"], health["total_display"], health["budget_display"]
     ))
+    print(f"  Workspace: {get_repo_root()}")
     print("Type /help for commands, 'exit' to quit.\n")
 
     while True:
         try:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            if session["first_message_sent"] and len(agent.messages) > 1:
-                save_chat(session["chat_id"], session["title"], agent.messages, owner_id=CLI_USER_ID)
-                set_active_chat(CLI_USER_ID, session["chat_id"])
+            _save_session(agent, session)
             service.stop()
             print("\nGoodbye.")
             break
 
         if user_input.lower() in ("exit", "quit"):
-            if session["first_message_sent"] and len(agent.messages) > 1:
-                save_chat(session["chat_id"], session["title"], agent.messages, owner_id=CLI_USER_ID)
-                set_active_chat(CLI_USER_ID, session["chat_id"])
+            _save_session(agent, session)
             service.stop()
             print("Goodbye.")
             break
@@ -139,9 +164,7 @@ def main(argv: list[str] | None = None):
                     if not session["first_message_sent"]:
                         session["title"] = make_title(img_prompt or "Clipboard image")
                         session["first_message_sent"] = True
-                    if session["first_message_sent"] and len(agent.messages) > 1:
-                        save_chat(session["chat_id"], session["title"], agent.messages, owner_id=CLI_USER_ID)
-                        set_active_chat(CLI_USER_ID, session["chat_id"])
+                    _save_session(agent, session)
                 except Exception as e:
                     print(f"\nError: {e}\n")
                 continue
@@ -161,9 +184,7 @@ def main(argv: list[str] | None = None):
                     if not session["first_message_sent"]:
                         session["title"] = make_title(f"Image: {img_path}")
                         session["first_message_sent"] = True
-                    if session["first_message_sent"] and len(agent.messages) > 1:
-                        save_chat(session["chat_id"], session["title"], agent.messages, owner_id=CLI_USER_ID)
-                        set_active_chat(CLI_USER_ID, session["chat_id"])
+                    _save_session(agent, session)
                 except Exception as e:
                     print(f"\nError: {e}\n")
                 continue
@@ -181,9 +202,7 @@ def main(argv: list[str] | None = None):
                 session["title"] = make_title(user_input)
                 session["first_message_sent"] = True
 
-            if session["first_message_sent"] and len(agent.messages) > 1:
-                save_chat(session["chat_id"], session["title"], agent.messages, owner_id=CLI_USER_ID)
-                set_active_chat(CLI_USER_ID, session["chat_id"])
+            _save_session(agent, session)
 
             milestone = agent.storage.check_milestone()
             if milestone:

@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from core.chat_store import delete_chat, list_chats, load_chat, make_title, new_chat_id, save_chat
+from core.chat_store import delete_chat, list_chats, load_chat, make_title, new_chat_id, save_chat, set_active_chat
 from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
 from core.identity import CLI_USER_ID
 from core.cli import BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, _c, render_storage_meter
@@ -96,10 +96,15 @@ def _chats_resume(chat_id: str, agent, session: dict):
     _auto_save(agent, session)
 
     # Load the resumed conversation
-    agent.messages = chat["messages"]
+    agent.messages = agent.apply_runtime_overrides(messages=chat["messages"])
     session["chat_id"] = chat["id"]
     session["title"] = chat["title"]
     session["first_message_sent"] = True
+    set_active_chat(
+        session.get("owner_id", CLI_USER_ID),
+        session["chat_id"],
+        scope=session.get("active_chat_scope"),
+    )
 
     print(_c(GREEN, f"  Resumed: {chat['title']}"))
     print(_c(DIM, f"  {len(chat['messages'])} messages loaded.\n"))
@@ -124,8 +129,12 @@ def cmd_new(args: str, agent, session: dict):
     session["first_message_sent"] = False
 
     # Rebuild messages with just the system prompt
-    system_msg = agent.messages[0] if agent.messages else None
-    agent.messages = [system_msg] if system_msg else []
+    agent.messages = [agent.build_system_message()]
+    set_active_chat(
+        session.get("owner_id", CLI_USER_ID),
+        session["chat_id"],
+        scope=session.get("active_chat_scope"),
+    )
 
     print(_c(GREEN, "  New conversation started.\n"))
 

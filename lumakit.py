@@ -18,6 +18,7 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
+INVOCATION_CWD = Path.cwd().resolve()
 REPO_ROOT = Path(__file__).resolve().parent
 os.chdir(REPO_ROOT)
 
@@ -680,6 +681,7 @@ def command_serve(args) -> int:
 
 
 def command_cli(args) -> int:
+    os.chdir(INVOCATION_CWD)
     # Import lazily so the env loading at the top of this module runs before
     # the CLI surface imports agent/core modules that read configuration.
     from surfaces.cli import main as cli_main
