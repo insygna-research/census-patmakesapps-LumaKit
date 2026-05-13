@@ -12,7 +12,7 @@ from core.display import DisplayHooks, use_display
 from core.diffs import build_unified_diff, detect_line_ending, normalize_line_endings
 from core.interrupts import interrupt_context
 from core.app_runtime_config import get_app_runtime_config
-from core.paths import get_data_dir, get_repo_root
+from core.paths import get_data_dir, get_repo_root, set_workspace_root
 from ollama_client import (
     OllamaClient,
     OllamaConnectionError,
@@ -480,7 +480,8 @@ class Agent:
         self.interrupt_requested = False
 
         # Initialize storage manager first (needed by code index)
-        self.storage = StorageManager(get_repo_root())
+        self.workspace_root = get_repo_root().resolve(strict=False)
+        self.storage = StorageManager(self.workspace_root)
 
         # Initialize the tool registry and auto-load all tools from the tools folder
         self.registry = ToolRegistry()
@@ -490,7 +491,7 @@ class Agent:
         # built lazily so startup and non-code chats don't pay the scan cost.
         build_index_in_background = os.getenv("LUMAKIT_CODE_INDEX_BACKGROUND", "").strip() in {"1", "true", "yes"}
         self.code_index = LazyCodeIndex(
-            root=get_repo_root(),
+            root=self.workspace_root,
             storage_manager=self.storage,
             background=build_index_in_background,
         )
@@ -511,7 +512,7 @@ class Agent:
         self.last_model_used = None
         self.ollama = OllamaClient(fallback_model=self.fallback_model)
 
-        root = get_repo_root()
+        root = self.workspace_root
 
         # Build the tool name list for the system prompt. The project tree
         # used to live in this prompt too — it is now exposed via the
@@ -568,6 +569,33 @@ class Agent:
 
         # Conversation history
         self.messages = [self.build_system_message()]
+
+    def set_workspace_root(self, root) -> None:
+        root = Path(root).expanduser().resolve(strict=False)
+        set_workspace_root(root)
+        if getattr(self, "workspace_root", None) == root:
+            return
+        self.workspace_root = root
+        self.storage = StorageManager(root)
+        build_index_in_background = os.getenv("LUMAKIT_CODE_INDEX_BACKGROUND", "").strip() in {"1", "true", "yes"}
+        self.code_index = LazyCodeIndex(
+            root=root,
+            storage_manager=self.storage,
+            background=build_index_in_background,
+        )
+        # Re-register code-intel tools so they bind to the new index/root.
+        for tool in self.code_index.get_tools():
+            self.registry.register(tool, group="code_intel")
+        self._tools_schema_cache_version = None
+        self._tools_schema_cache = {}
+        self._system_prompt_cache.clear()
+        self._system_message_cache.clear()
+        self._system_prompt_prefix = re.sub(
+            r"Current working directory: .*\n",
+            lambda _m: f"Current working directory: {root}\n",
+            self._system_prompt_prefix,
+            count=1,
+        )
 
     def _emit_display_status(self, message: str) -> None:
         self.run_controller.note_activity("status", message)

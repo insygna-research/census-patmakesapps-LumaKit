@@ -16,6 +16,9 @@ const $newChatBtn = document.getElementById('new-chat-btn');
 const $topbarTitle = document.getElementById('topbar-title');
 const $modelBadge = document.getElementById('model-badge');
 const $statusDot = document.getElementById('status-dot');
+const $workspaceForm = document.getElementById('workspace-form');
+const $workspaceInput = document.getElementById('workspace-input');
+const $workspaceBrowse = document.getElementById('workspace-browse');
 const $sidebarToggle = document.getElementById('sidebar-toggle');
 const $sidebar = document.getElementById('sidebar');
 const $diffPanel = document.getElementById('diff-panel');
@@ -40,6 +43,7 @@ const $emptySubcopy = document.getElementById('empty-subcopy');
 let isWorking = false;
 let currentView = 'chat';
 let currentChatId = null;
+let currentWorkspacePath = '';
 let statusEl = null;
 let activityCardEl = null;
 let activityTitleEl = null;
@@ -205,7 +209,34 @@ function scrollToBottom() {
 
 function setWorking(working) {
     isWorking = working;
+    if ($workspaceInput) $workspaceInput.disabled = working;
+    if ($workspaceBrowse) $workspaceBrowse.disabled = working;
     // Type /stop to interrupt — no UI toggle needed
+}
+
+function workspaceLabel(path) {
+    const text = String(path || '').trim();
+    if (!text) return 'Working directory';
+    const normalized = text.replace(/\\/g, '/');
+    const parts = normalized.split('/').filter(Boolean);
+    return parts.slice(-2).join('/') || text;
+}
+
+function setWorkspace(path, displayPath) {
+    currentWorkspacePath = String(path || '');
+    if ($workspaceInput) {
+        $workspaceInput.value = currentWorkspacePath;
+        $workspaceInput.title = displayPath || currentWorkspacePath || 'Working directory';
+        $workspaceInput.setAttribute('aria-label', `Working directory: ${workspaceLabel(currentWorkspacePath)}`);
+    }
+}
+
+function showWorkspaceError(message) {
+    if ($workspaceInput) {
+        $workspaceInput.classList.add('error');
+        $workspaceInput.title = message || 'Could not set working directory.';
+        window.setTimeout(() => $workspaceInput.classList.remove('error'), 1800);
+    }
 }
 
 function applySetupState() {
@@ -1224,6 +1255,9 @@ const ws = new WS({
 
     response(data) {
         setWorking(false);
+        if (data.workspace_path) {
+            setWorkspace(data.workspace_path, data.workspace_display);
+        }
         const runState = data.run_state || 'completed';
         const cardState = runState === 'failed' ? 'error'
             : runState === 'stopped' || runState === 'interrupted' ? 'stopped'
@@ -1331,6 +1365,22 @@ const ws = new WS({
         addMessage('assistant', `Error: ${data.text}`);
     },
 
+    workspace_updated(data) {
+        setWorkspace(data.workspace_path, data.workspace_display);
+    },
+
+    workspace_error(data) {
+        showWorkspaceError(data.text || 'Could not set working directory.');
+    },
+
+    workspace_picked(data) {
+        const path = String(data.path || '').trim();
+        if (!path) return;
+        if ($workspaceInput) $workspaceInput.value = path;
+        if (path === currentWorkspacePath) return;
+        ws.send({ type: 'set_workspace', path });
+    },
+
     confirm(data) {
         showConfirmCard(data);
     },
@@ -1338,6 +1388,7 @@ const ws = new WS({
     chat_loaded(data) {
         currentChatId = data.chat_id;
         $topbarTitle.textContent = data.title || 'New Chat';
+        setWorkspace(data.workspace_path, data.workspace_display);
         clearMessages();
 
         const hasMessages = (data.messages || []).some(m => m.role === 'user' || m.role === 'assistant');
@@ -1535,6 +1586,18 @@ function sendMessage() {
 
 $sendBtn.onclick = sendMessage;
 
+$workspaceForm?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const path = ($workspaceInput?.value || '').trim();
+    if (!path || path === currentWorkspacePath) return;
+    ws.send({ type: 'set_workspace', path });
+});
+
+$workspaceBrowse?.addEventListener('click', () => {
+    if (isWorking) return;
+    ws.send({ type: 'pick_workspace', base: currentWorkspacePath || '' });
+});
+
 $input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -1562,6 +1625,8 @@ $sidebarToggle.onclick = () => {
 // Navigation
 $navTasks.onclick = () => switchView('task');
 $navSettings.onclick = () => switchView('settings');
+
+$modelBadge?.addEventListener('click', () => switchView('settings'));
 $setupOpenSettings.onclick = () => {
     pendingSettingsFocus = true;
     switchView('settings');

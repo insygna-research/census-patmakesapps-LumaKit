@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import shutil
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 _data_dir: Path | None = None
 _migration_done = False
+_workspace_root: ContextVar[Path | None] = ContextVar("lumakit_workspace_root", default=None)
 
 
 def get_data_dir() -> Path:
@@ -78,7 +81,21 @@ def _maybe_migrate():
 
 
 def get_repo_root() -> Path:
-    return Path.cwd()
+    return _workspace_root.get() or Path.cwd()
+
+
+def set_workspace_root(path: str | Path):
+    root = Path(path).expanduser().resolve(strict=False)
+    return _workspace_root.set(root)
+
+
+@contextmanager
+def workspace_context(path: str | Path):
+    token = set_workspace_root(path)
+    try:
+        yield get_repo_root()
+    finally:
+        _workspace_root.reset(token)
 
 
 def get_display_path(path: Path) -> str:

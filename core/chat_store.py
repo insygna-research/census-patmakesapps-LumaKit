@@ -41,6 +41,14 @@ def _connect():
             PRIMARY KEY (user_id, scope)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_workspaces (
+            chat_id TEXT PRIMARY KEY,
+            owner_id TEXT,
+            workspace_path TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "owner_id" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN owner_id TEXT")
@@ -188,9 +196,43 @@ def delete_chat(chat_id: str, owner_id: str | None = None) -> bool:
             "DELETE FROM conversations WHERE id = ? AND owner_id = ?",
             (chat_id, str(owner_id)),
         )
+    if cursor.rowcount > 0:
+        conn.execute("DELETE FROM chat_workspaces WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
     return cursor.rowcount > 0
+
+
+def set_chat_workspace(chat_id: str, workspace_path: str, owner_id: str | None = None) -> None:
+    if not chat_id or not workspace_path:
+        return
+    conn = _connect()
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO chat_workspaces (chat_id, owner_id, workspace_path, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET owner_id = excluded.owner_id, workspace_path = excluded.workspace_path, updated_at = excluded.updated_at",
+        (str(chat_id), str(owner_id) if owner_id is not None else None, str(workspace_path), now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_workspace(chat_id: str, owner_id: str | None = None) -> str | None:
+    if not chat_id:
+        return None
+    conn = _connect()
+    if owner_id is None:
+        row = conn.execute(
+            "SELECT workspace_path FROM chat_workspaces WHERE chat_id = ?",
+            (str(chat_id),),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT workspace_path FROM chat_workspaces WHERE chat_id = ? AND (owner_id = ? OR owner_id IS NULL)",
+            (str(chat_id), str(owner_id)),
+        ).fetchone()
+    conn.close()
+    return row["workspace_path"] if row else None
 
 
 def iter_chats_with_messages(owner_id: str | None = None) -> list[dict]:

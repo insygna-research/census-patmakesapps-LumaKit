@@ -4,7 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from core.paths import get_data_dir, get_display_path, get_repo_root
+from core.paths import get_data_dir, get_display_path, get_repo_root, set_workspace_root
 
 
 def get_workspace_context_tool():
@@ -87,5 +87,5 @@ def _set_workspace(inputs):
         raise FileNotFoundError(f"Workspace does not exist: {path}")
     if not path.is_dir():
         raise NotADirectoryError(f"Workspace is not a directory: {path}")
-    os.chdir(path)
+    set_workspace_root(path)
     return _workspace_context({})

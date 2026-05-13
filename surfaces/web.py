@@ -34,18 +34,20 @@ from core import email_draft_store
 from core.chat_store import (
     delete_chat,
     get_active_chat,
+    get_chat_workspace,
     list_chats,
     load_chat,
     make_title,
     new_chat_id,
     save_chat,
     set_active_chat,
+    set_chat_workspace,
 )
 from core import notifications as notification_log
 from core.display import DisplayHooks
 from core.identity import WEB_USER_ID
 from core.interface_context import set_interface
-from core.paths import get_data_dir
+from core.paths import get_data_dir, set_workspace_root
 from core.runtime_config import apply_user_runtime, get_effective_config_for_user
 from core.service import LumaKitService, Surface
 from core.telegram_state import OWNER_ID
@@ -65,6 +67,81 @@ WEB_URL = f"http://localhost:{PORT}"
 STRUQT_TERM_RE = re.compile(r"\b(?:struqt|struct|strukt|struq|st?ruqt)\b", re.IGNORECASE)
 
 app = FastAPI(title="LumaKit")
+
+
+def _default_workspace() -> Path:
+    return _REPO_ROOT.resolve(strict=False)
+
+
+def _resolve_workspace_path(raw_path: str | None, *, base: str | Path | None = None) -> Path:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return _default_workspace()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        base_path = Path(base).expanduser() if base else _default_workspace()
+        path = base_path / path
+    resolved = path.resolve(strict=False)
+    if not resolved.exists():
+        raise FileNotFoundError(f"Workspace does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise NotADirectoryError(f"Workspace is not a directory: {resolved}")
+    return resolved
+
+
+def _chat_workspace(chat_id: str | None) -> Path:
+    if chat_id:
+        saved = get_chat_workspace(chat_id, owner_id=WEB_USER_ID)
+        if saved:
+            try:
+                return _resolve_workspace_path(saved)
+            except (FileNotFoundError, NotADirectoryError):
+                pass
+    return _default_workspace()
+
+
+def _pick_workspace_dialog(initial: str | Path | None) -> str | None:
+    """Open a native folder picker on the server host. Returns the chosen path or None."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except Exception:
+        return None
+
+    initial_dir = ""
+    if initial:
+        try:
+            initial_dir = str(Path(initial).expanduser().resolve(strict=False))
+        except Exception:
+            initial_dir = ""
+
+    root = tkinter.Tk()
+    try:
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        chosen = filedialog.askdirectory(
+            title="Select working directory",
+            initialdir=initial_dir or None,
+            mustexist=True,
+        )
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    chosen = (chosen or "").strip()
+    return chosen or None
+
+
+def _workspace_payload(path: str | Path) -> dict:
+    root = Path(path).expanduser().resolve(strict=False)
+    return {
+        "workspace_path": str(root),
+        "workspace_display": str(root),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +453,10 @@ def _prepare_web_turn(agent: Agent, session: dict):
     set_memory_active_user(WEB_USER_ID)
     set_react_context(None, None)
     set_interface("web", WEB_USER_ID)
+    workspace = _resolve_workspace_path(session.get("workspace_path"))
+    session["workspace_path"] = str(workspace)
+    set_workspace_root(workspace)
+    agent.set_workspace_root(workspace)
     session["messages"] = agent.messages
     apply_user_runtime(agent, session, WEB_USER_ID, surface="web")
 
@@ -694,19 +775,23 @@ async def websocket_chat(ws: WebSocket):
     if active_id:
         resumed = load_chat(active_id, owner_id=WEB_USER_ID)
     if resumed:
+        workspace = _chat_workspace(resumed["id"])
         session = {
             "chat_id": resumed["id"],
             "title": resumed["title"],
             "first_message_sent": True,
             "messages": resumed["messages"],
+            "workspace_path": str(workspace),
         }
         agent.messages = resumed["messages"]
     else:
+        workspace = _default_workspace()
         session = {
             "chat_id": new_chat_id(),
             "title": "",
             "first_message_sent": False,
             "messages": agent.messages,
+            "workspace_path": str(workspace),
         }
     _prepare_web_turn(agent, session)
     set_active_chat(WEB_USER_ID, session["chat_id"])
@@ -717,6 +802,12 @@ async def websocket_chat(ws: WebSocket):
             "chat_id": session["chat_id"],
             "title": session["title"],
             "messages": resumed["messages"],
+            **_workspace_payload(session["workspace_path"]),
+        })
+    else:
+        await ws.send_json({
+            "type": "workspace_updated",
+            **_workspace_payload(session["workspace_path"]),
         })
 
     # Replay notifications the user hasn't seen on web yet — bridges the
@@ -744,6 +835,7 @@ async def websocket_chat(ws: WebSocket):
                 session["first_message_sent"] = True
             save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
             set_active_chat(WEB_USER_ID, session["chat_id"])
+            set_chat_workspace(session["chat_id"], session["workspace_path"], owner_id=WEB_USER_ID)
             snap = agent.run_controller.get_status_snapshot()
             run_state = snap.get("state") or "completed"
             run_error = snap.get("last_error") or ""
@@ -758,6 +850,7 @@ async def websocket_chat(ws: WebSocket):
                     "run_state": run_state,
                     "run_error": run_error,
                     "streamed": bool(response.get("streamed")),
+                    **_workspace_payload(session["workspace_path"]),
                 })
         except Exception as e:
             if not ws_closed["v"]:
@@ -811,6 +904,48 @@ async def websocket_chat(ws: WebSocket):
                 await ws.send_json({"type": "status", "text": "Stopping..."})
                 continue
 
+            if msg_type == "pick_workspace":
+                if agent_task and not agent_task.done():
+                    await ws.send_json({"type": "workspace_error", "text": "Finish or stop the current run before changing workspace."})
+                    continue
+                base_hint = data.get("base") or session.get("workspace_path") or str(_default_workspace())
+                try:
+                    chosen = await asyncio.get_event_loop().run_in_executor(
+                        None, _pick_workspace_dialog, base_hint
+                    )
+                except Exception as exc:
+                    await ws.send_json({"type": "workspace_error", "text": f"Folder picker failed: {exc}"})
+                    continue
+                if not chosen:
+                    continue
+                await ws.send_json({"type": "workspace_picked", "path": chosen})
+                continue
+
+            if msg_type == "set_workspace":
+                if agent_task and not agent_task.done():
+                    await ws.send_json({"type": "workspace_error", "text": "Finish or stop the current run before changing workspace."})
+                    continue
+                raw_path = data.get("path", "")
+                try:
+                    workspace = _resolve_workspace_path(raw_path, base=session.get("workspace_path"))
+                except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+                    await ws.send_json({"type": "workspace_error", "text": str(exc)})
+                    continue
+
+                session["workspace_path"] = str(workspace)
+                set_workspace_root(workspace)
+                agent.set_workspace_root(workspace)
+                agent.apply_runtime_overrides(messages=agent.messages)
+                session["messages"] = agent.messages
+                set_chat_workspace(session["chat_id"], session["workspace_path"], owner_id=WEB_USER_ID)
+                if session["first_message_sent"] and len(agent.messages) > 1:
+                    save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
+                await ws.send_json({
+                    "type": "workspace_updated",
+                    **_workspace_payload(session["workspace_path"]),
+                })
+                continue
+
             # Load a specific chat
             if msg_type == "load_chat":
                 if agent_task and not agent_task.done():
@@ -819,9 +954,11 @@ async def websocket_chat(ws: WebSocket):
                 target_id = data.get("chat_id", "")
                 loaded = load_chat(target_id, owner_id=WEB_USER_ID)
                 if loaded:
+                    workspace = _chat_workspace(loaded["id"])
                     session["chat_id"] = loaded["id"]
                     session["title"] = loaded["title"]
                     session["first_message_sent"] = True
+                    session["workspace_path"] = str(workspace)
                     agent.messages = loaded["messages"]
                     session["messages"] = agent.messages
                     _prepare_web_turn(agent, session)
@@ -831,6 +968,7 @@ async def websocket_chat(ws: WebSocket):
                         "chat_id": session["chat_id"],
                         "title": session["title"],
                         "messages": loaded["messages"],
+                        **_workspace_payload(session["workspace_path"]),
                     })
                 else:
                     await ws.send_json({"type": "error", "text": "Chat not found"})
@@ -844,6 +982,9 @@ async def websocket_chat(ws: WebSocket):
                 session["chat_id"] = new_chat_id()
                 session["title"] = ""
                 session["first_message_sent"] = False
+                session["workspace_path"] = str(_default_workspace())
+                set_workspace_root(session["workspace_path"])
+                agent.set_workspace_root(session["workspace_path"])
                 agent.messages = [agent.build_system_message()]
                 session["messages"] = agent.messages
                 _prepare_web_turn(agent, session)
@@ -853,6 +994,7 @@ async def websocket_chat(ws: WebSocket):
                     "chat_id": session["chat_id"],
                     "title": "",
                     "messages": [],
+                    **_workspace_payload(session["workspace_path"]),
                 })
                 continue
 
@@ -881,6 +1023,7 @@ async def websocket_chat(ws: WebSocket):
                         session["first_message_sent"] = True
                     save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
                     set_active_chat(WEB_USER_ID, session["chat_id"])
+                    set_chat_workspace(session["chat_id"], session["workspace_path"], owner_id=WEB_USER_ID)
                     await ws.send_json({
                         "type": "response",
                         "text": fast_reply,
@@ -891,6 +1034,7 @@ async def websocket_chat(ws: WebSocket):
                         "run_state": "completed",
                         "run_error": "",
                         "streamed": False,
+                        **_workspace_payload(session["workspace_path"]),
                     })
                     continue
 

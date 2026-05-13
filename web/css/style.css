@@ -245,6 +245,61 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
+}
+
+.workspace-form {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 220px;
+    max-width: 420px;
+}
+
+.workspace-input {
+    width: min(32vw, 340px);
+    min-width: 160px;
+    height: 28px;
+    padding: 0 9px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+.workspace-input:focus {
+    outline: none;
+    border-color: var(--accent-deep);
+    color: var(--text-primary);
+}
+
+.workspace-input.error {
+    border-color: var(--error);
+    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12);
+}
+
+.workspace-save {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.workspace-save:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.workspace-input:disabled,
+.workspace-save:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .model-badge {
@@ -254,6 +309,14 @@ body {
     padding: 3px 10px;
     border-radius: 12px;
     border: 1px solid var(--border-subtle);
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.model-badge:hover {
+    color: var(--text-primary);
+    border-color: var(--accent-deep);
+    background: var(--bg-hover);
 }
 
 .status-dot {
@@ -1850,6 +1913,25 @@ body {
 
     .sidebar-toggle {
         display: block;
+    }
+
+    .topbar {
+        gap: 8px;
+        padding: 0 10px;
+    }
+
+    .workspace-form {
+        min-width: 0;
+        max-width: 46vw;
+    }
+
+    .workspace-input {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .workspace-save {
+        display: none;
     }
 
     .message.user .bubble {
