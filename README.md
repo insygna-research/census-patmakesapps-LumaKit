@@ -284,6 +284,17 @@ The repo now has the pieces a normal Ollama user actually needs:
 - [Gmail Setup](docs/gmail_setup.md)
 - [Family & Group Alerts](docs/family_alerts.md)
 
+## Connect to Lumalok
+
+LumaKit includes tools for [Lumalok](https://github.com/patmakesapps/Lumalok), a local encrypted secrets manager. After Lumalok is running and unlocked, Lumi can connect to its local-only API to create projects, add secrets, list secret metadata, and check expiring secrets.
+
+1. Install and open Lumalok.
+2. Unlock your Lumalok vault.
+3. In Lumalok, open **Settings** and enable **LumaKit Integration**.
+4. In LumaKit, ask Lumi to connect to Lumalok.
+
+Lumalok stores the local API token at `~/.lumalok/integration.json`. Secret values are not returned by default; Lumi should reveal raw values only when explicitly requested.
+
 ## Project structure
 
 ```text
