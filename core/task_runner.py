@@ -160,6 +160,7 @@ class TaskRunner:
         # Lazy — built on first use so we don't slow down startup
         self._ollama: OllamaClient | None = None
         self._registry = None
+        self._code_index = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -420,7 +421,14 @@ class TaskRunner:
         system = (
             "You are Lumi, an autonomous agent executing a specific task step. "
             "Use your tools to complete the step described. "
-            "Be thorough — search the web, fetch pages, run code as needed.\n\n"
+            "Be thorough — search the web, fetch pages, run code as needed.\n"
+            "For project overview, build/test command discovery, package manager, "
+            "framework, or entry-point questions, call inspect_project first. "
+            "For code body/source requests, use find_definition or search_symbols, "
+            "then read_symbol instead of stopping after a location lookup. "
+            "For git status, commit summaries, branch/upstream state, changed-file "
+            "reviews, or push readiness, use git_preflight, git_status, show_diff, "
+            "and git_log instead of raw git commands through run_command.\n\n"
             f"{identity_block}"
             "When done, write a clear summary of what you found and did."
         )
@@ -459,9 +467,12 @@ class TaskRunner:
                 fn = tc.get("function", {})
                 name = fn.get("name")
                 inputs = fn.get("arguments", {})
+                command_text = str(inputs.get("command", "") or "")
+                if not command_text and isinstance(inputs.get("args"), list):
+                    command_text = " ".join(str(part) for part in inputs.get("args", []))
                 protected_shell = (
-                    name == "execute_shell"
-                    and PROTECTED_TASK_SHELL_RE.search(str(inputs.get("command", "") or ""))
+                    name in {"execute_shell", "run_command"}
+                    and PROTECTED_TASK_SHELL_RE.search(command_text)
                 )
                 if name in PROTECTED_TASK_TOOLS or protected_shell:
                     result = {
@@ -474,6 +485,7 @@ class TaskRunner:
                     }
                 else:
                     result = registry.execute(name, inputs)
+                    self._update_code_index_after_tool(name, inputs, result)
                 messages.append({
                     "role": "tool",
                     "name": name,
@@ -619,10 +631,37 @@ class TaskRunner:
 
     def _get_registry(self):
         if self._registry is None:
+            from core.paths import get_repo_root
             from tool_registry import ToolRegistry
+            from tools.code_intel.code_index import LazyCodeIndex
+
             self._registry = ToolRegistry()
             self._registry.load_tools_from_folder(skip_dirs={"code_intel"})
+            self._code_index = LazyCodeIndex(root=get_repo_root())
+            for tool in self._code_index.get_tools():
+                self._registry.register(tool, group="code_intel")
         return self._registry
+
+    def _update_code_index_after_tool(self, name: str, inputs: dict, result: dict) -> None:
+        if self._code_index is None or not result.get("success"):
+            return
+        if name in ("edit_file", "write_file", "delete_file"):
+            changed_path = inputs.get("path")
+            if changed_path:
+                self._code_index.update_file(changed_path)
+        elif name == "apply_patch":
+            for item in result.get("data", {}).get("changed_files", []):
+                changed_path = item.get("path")
+                if changed_path:
+                    self._code_index.update_file(changed_path)
+                old_path = item.get("old_path")
+                if old_path and old_path != changed_path:
+                    self._code_index.update_file(old_path)
+        elif name == "move_path":
+            data = result.get("data", {})
+            for changed_path in (data.get("source_path"), data.get("destination_path")):
+                if changed_path:
+                    self._code_index.update_file(changed_path)
 
     # ------------------------------------------------------------------
     # Format helpers

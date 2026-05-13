@@ -1,5 +1,7 @@
 import os
+import re
 import threading
+from collections import Counter
 from pathlib import Path
 
 from tools.code_intel.cache import IndexCache, _hash_file
@@ -158,11 +160,11 @@ class CodeIndex:
     def find_usages(self, symbol: str, kind: str | None = None) -> list[dict]:
         """Find all references to a symbol across the codebase."""
         usages = []
+        token_re = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])")
 
         # 1. Search import references
-        needle_lower = symbol.lower()
         for ref in self.references:
-            if needle_lower in ref.context.lower():
+            if token_re.search(ref.context):
                 usages.append({
                     "file": ref.file,
                     "line": ref.line,
@@ -182,16 +184,18 @@ class CodeIndex:
                 # Skip lines already captured as imports
                 if any(u["file"] == rel and u["line"] == line_num for u in usages):
                     continue
-                if symbol in line:
+                if token_re.search(line):
                     # Determine usage kind from context
                     stripped = line.strip()
+                    if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+                        continue
                     if f"import {symbol}" in stripped or f"from " in stripped:
                         continue  # already captured
-                    elif f"{symbol}(" in stripped:
+                    elif re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}\s*\(", stripped):
                         use_kind = "call"
                     elif f".{symbol}" in stripped:
                         use_kind = "attribute"
-                    elif f"{symbol} =" in stripped or f"{symbol}:" in stripped:
+                    elif re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}\s*[:=]", stripped):
                         use_kind = "assignment"
                     else:
                         use_kind = "reference"
@@ -207,6 +211,121 @@ class CodeIndex:
                     })
 
         return usages
+
+    def read_symbol(self, symbol: str | None = None, qualified_name: str | None = None,
+                    kind: str | None = None, max_lines: int = 400,
+                    include_line_numbers: bool = True) -> dict:
+        """Return the full source body for matching symbol definitions."""
+        if qualified_name:
+            match = self.table.lookup_qualified(qualified_name)
+            matches = [match] if match else []
+        elif symbol:
+            matches = self.table.lookup(symbol)
+        else:
+            raise ValueError("symbol or qualified_name is required")
+
+        if kind:
+            matches = [s for s in matches if s.kind == kind]
+        if not matches:
+            return {
+                "symbol": symbol,
+                "qualified_name": qualified_name,
+                "found": False,
+                "results": [],
+            }
+
+        results = []
+        for sym in matches[:10]:
+            try:
+                source = Path(self.root / sym.file).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                source = ""
+            lines = source.splitlines()
+            start = max(1, sym.line)
+            end = min(len(lines), sym.end_line)
+            body_lines = lines[start - 1:end]
+            truncated = len(body_lines) > max_lines
+            body_lines = body_lines[:max_lines]
+            if include_line_numbers:
+                width = len(str(start + len(body_lines)))
+                body = "\n".join(
+                    f"{line_no:>{width}}: {line}"
+                    for line_no, line in enumerate(body_lines, start=start)
+                )
+            else:
+                body = "\n".join(body_lines)
+            results.append({
+                "symbol": sym.name,
+                "qualified_name": sym.qualified_name,
+                "kind": sym.kind,
+                "file": sym.file,
+                "line": sym.line,
+                "end_line": sym.end_line,
+                "params": sym.params or None,
+                "return_type": sym.return_type,
+                "docstring": sym.docstring,
+                "parent": sym.parent,
+                "content": body,
+                "truncated": truncated,
+            })
+
+        return {
+            "symbol": symbol,
+            "qualified_name": qualified_name,
+            "found": True,
+            "count": len(matches),
+            "results": results,
+            "truncated": len(matches) > 10,
+        }
+
+    def find_usages_context(self, symbol: str, kind: str | None = None,
+                            context_lines: int = 2, max_results: int = 25) -> dict:
+        """Find usages and include nearby source context."""
+        usages = self.find_usages(symbol, kind=kind)
+        results = []
+        for usage in usages[:max_results]:
+            try:
+                source = Path(self.root / usage["file"]).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                source = ""
+            lines = source.splitlines()
+            line_no = int(usage["line"])
+            start = max(1, line_no - context_lines)
+            end = min(len(lines), line_no + context_lines)
+            width = len(str(end))
+            context = "\n".join(
+                f"{idx:>{width}}: {lines[idx - 1]}"
+                for idx in range(start, end + 1)
+            )
+            results.append({
+                **usage,
+                "context_start_line": start,
+                "context_end_line": end,
+                "source_context": context,
+            })
+        return {
+            "symbol": symbol,
+            "total": len(usages),
+            "count": len(results),
+            "truncated": len(usages) > len(results),
+            "usages": results,
+        }
+
+    def code_index_summary(self) -> dict:
+        """Return high-level stats for the current code index."""
+        symbols = self.table.all_symbols()
+        return {
+            "root": str(self.root),
+            "symbols": len(symbols),
+            "references": len(self.references),
+            "indexed_files": len(self._file_hashes),
+            "languages": dict(Counter(detect_language(path) for path in self._file_hashes).most_common()),
+            "symbol_kinds": dict(Counter(sym.kind for sym in symbols).most_common()),
+            "largest_symbol_files": [
+                {"file": file, "symbols": count}
+                for file, count in Counter(sym.file for sym in symbols).most_common(20)
+            ],
+        }
 
     def get_file_structure(self, file_path: str) -> dict:
         """Return a table-of-contents for a file."""
@@ -357,10 +476,13 @@ class CodeIndex:
         return [
             get_find_definition_tool(self),
             get_find_usages_tool(self),
+            get_find_usages_context_tool(self),
             get_file_structure_tool(self),
+            get_read_symbol_tool(self),
             get_search_symbols_tool(self),
             get_find_imports_tool(self),
             get_call_graph_tool(self),
+            get_code_index_summary_tool(self),
         ]
 
 
@@ -455,10 +577,13 @@ class LazyCodeIndex:
         return [
             get_find_definition_tool(self),
             get_find_usages_tool(self),
+            get_find_usages_context_tool(self),
             get_file_structure_tool(self),
+            get_read_symbol_tool(self),
             get_search_symbols_tool(self),
             get_find_imports_tool(self),
             get_call_graph_tool(self),
+            get_code_index_summary_tool(self),
         ]
 
     def update_file(self, file_path: str):
@@ -474,8 +599,14 @@ class LazyCodeIndex:
     def find_usages(self, *args, **kwargs):
         return self._ensure_built().find_usages(*args, **kwargs)
 
+    def find_usages_context(self, *args, **kwargs):
+        return self._ensure_built().find_usages_context(*args, **kwargs)
+
     def get_file_structure(self, *args, **kwargs):
         return self._ensure_built().get_file_structure(*args, **kwargs)
+
+    def read_symbol(self, *args, **kwargs):
+        return self._ensure_built().read_symbol(*args, **kwargs)
 
     def search_symbols(self, *args, **kwargs):
         return self._ensure_built().search_symbols(*args, **kwargs)
@@ -485,6 +616,9 @@ class LazyCodeIndex:
 
     def get_call_graph(self, *args, **kwargs):
         return self._ensure_built().get_call_graph(*args, **kwargs)
+
+    def code_index_summary(self, *args, **kwargs):
+        return self._ensure_built().code_index_summary(*args, **kwargs)
 
 
 # ======================================================================
@@ -552,6 +686,35 @@ def get_find_usages_tool(index: CodeIndex):
     }
 
 
+def get_find_usages_context_tool(index: CodeIndex):
+    def _execute(inputs):
+        return index.find_usages_context(
+            symbol=inputs["symbol"],
+            kind=inputs.get("kind"),
+            context_lines=int(inputs.get("context_lines", 2)),
+            max_results=int(inputs.get("max_results", 25)),
+        )
+
+    return {
+        "name": "find_usages_context",
+        "description": (
+            "Find symbol usages and include nearby source lines for each result. "
+            "Use this when raw usage lines are not enough to make a safe change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Name of the symbol to search for"},
+                "kind": {"type": "string", "description": "Filter by usage kind (call, import, assignment, attribute)"},
+                "context_lines": {"type": "integer", "description": "Lines before/after each match (default 2)"},
+                "max_results": {"type": "integer", "description": "Max usage contexts to return (default 25)"},
+            },
+            "required": ["symbol"],
+        },
+        "execute": _execute,
+    }
+
+
 def get_file_structure_tool(index: CodeIndex):
     def _execute(inputs):
         return index.get_file_structure(inputs["path"])
@@ -568,6 +731,36 @@ def get_file_structure_tool(index: CodeIndex):
                 "path": {"type": "string", "description": "Path to the file (relative to project root)"},
             },
             "required": ["path"],
+        },
+        "execute": _execute,
+    }
+
+
+def get_read_symbol_tool(index: CodeIndex):
+    def _execute(inputs):
+        return index.read_symbol(
+            symbol=inputs.get("symbol"),
+            qualified_name=inputs.get("qualified_name"),
+            kind=inputs.get("kind"),
+            max_lines=int(inputs.get("max_lines", 400)),
+            include_line_numbers=bool(inputs.get("include_line_numbers", True)),
+        )
+
+    return {
+        "name": "read_symbol",
+        "description": (
+            "Read the full source body for a function, class, method, or variable definition. "
+            "Use this after search_symbols/find_definition when you need implementation details."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Short symbol name to read"},
+                "qualified_name": {"type": "string", "description": "Exact qualified symbol name, if known"},
+                "kind": {"type": "string", "description": "Filter by kind (function, class, method, variable)"},
+                "max_lines": {"type": "integer", "description": "Maximum lines per symbol (default 400)"},
+                "include_line_numbers": {"type": "boolean", "description": "Prefix lines with numbers (default true)"},
+            },
         },
         "execute": _execute,
     }
@@ -622,6 +815,24 @@ def get_find_imports_tool(index: CodeIndex):
                 "module": {"type": "string", "description": "Module name to search for (e.g. 'core.session')"},
                 "symbol": {"type": "string", "description": "Symbol name to search for in import statements"},
             },
+        },
+        "execute": _execute,
+    }
+
+
+def get_code_index_summary_tool(index: CodeIndex):
+    def _execute(inputs):
+        return index.code_index_summary()
+
+    return {
+        "name": "code_index_summary",
+        "description": (
+            "Return high-level code-index stats: indexed files, languages, symbol kinds, "
+            "and files with the most symbols."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
         },
         "execute": _execute,
     }

@@ -742,6 +742,72 @@ body {
     color: var(--accent-light);
 }
 
+.code-block {
+    margin: 0.75em 0;
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: #120e1e;
+}
+
+.code-block-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+    padding: 6px 10px 6px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: rgba(26, 20, 40, 0.98);
+}
+
+.code-block-language {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    text-overflow: ellipsis;
+    text-transform: lowercase;
+    white-space: nowrap;
+}
+
+.code-block-copy {
+    flex-shrink: 0;
+    min-width: 52px;
+    height: 24px;
+    padding: 0 9px;
+    border: 1px solid rgba(176, 124, 216, 0.28);
+    border-radius: 6px;
+    background: rgba(107, 63, 160, 0.14);
+    color: var(--accent-light);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.code-block-copy:hover {
+    border-color: rgba(212, 165, 240, 0.55);
+    background: rgba(107, 63, 160, 0.28);
+    color: #f2ddff;
+}
+
+.code-block-copy.copied {
+    border-color: rgba(74, 222, 128, 0.45);
+    background: rgba(74, 222, 128, 0.12);
+    color: var(--success);
+}
+
+.code-block-copy.failed {
+    border-color: rgba(248, 113, 113, 0.45);
+    background: rgba(248, 113, 113, 0.12);
+    color: var(--error);
+}
+
 .bubble pre {
     background: #120e1e;
     border: 1px solid var(--border-subtle);
@@ -749,6 +815,12 @@ body {
     border-radius: var(--radius-sm);
     overflow-x: auto;
     margin: 0.75em 0;
+}
+
+.code-block pre {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
 }
 
 .bubble pre code {

@@ -102,6 +102,103 @@ function renderMarkdown(text) {
         .replace(/\n/g, '<br>');
 }
 
+function getCodeLanguage(codeEl) {
+    const classes = Array.from(codeEl?.classList || []);
+    const languageClass = classes.find(cls => cls.startsWith('language-') || cls.startsWith('lang-'));
+    const raw = languageClass
+        ? languageClass.replace(/^language-/, '').replace(/^lang-/, '')
+        : '';
+    const normalized = (raw || '').trim().toLowerCase();
+    const aliases = {
+        js: 'javascript',
+        jsx: 'jsx',
+        ts: 'typescript',
+        tsx: 'tsx',
+        py: 'python',
+        ps1: 'powershell',
+        pwsh: 'powershell',
+        sh: 'bash',
+        shell: 'bash',
+        yml: 'yaml',
+        md: 'markdown',
+    };
+    return aliases[normalized] || normalized || 'text';
+}
+
+async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+}
+
+function enhanceCodeBlocks(root) {
+    if (!root) return;
+
+    if (window.hljs) {
+        root.querySelectorAll('pre code').forEach(codeEl => {
+            if (!codeEl.dataset.highlighted) {
+                hljs.highlightElement(codeEl);
+            }
+        });
+    }
+
+    root.querySelectorAll('pre').forEach(pre => {
+        if (pre.closest('.code-block')) return;
+
+        const code = pre.querySelector('code');
+        if (!code) return;
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'code-block';
+
+        const header = document.createElement('div');
+        header.className = 'code-block-header';
+
+        const language = document.createElement('span');
+        language.className = 'code-block-language';
+        language.textContent = getCodeLanguage(code);
+
+        const copy = document.createElement('button');
+        copy.className = 'code-block-copy';
+        copy.type = 'button';
+        copy.textContent = 'Copy';
+        copy.title = 'Copy code';
+        copy.setAttribute('aria-label', 'Copy code block');
+        copy.addEventListener('click', async () => {
+            const original = copy.textContent;
+            try {
+                await copyTextToClipboard(code.textContent || '');
+                copy.textContent = 'Copied';
+                copy.classList.add('copied');
+            } catch {
+                copy.textContent = 'Failed';
+                copy.classList.add('failed');
+            }
+            window.setTimeout(() => {
+                copy.textContent = original;
+                copy.classList.remove('copied', 'failed');
+            }, 1400);
+        });
+
+        header.appendChild(language);
+        header.appendChild(copy);
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(header);
+        wrapper.appendChild(pre);
+    });
+}
+
 function scrollToBottom() {
     $messages.scrollTop = $messages.scrollHeight;
 }
@@ -212,12 +309,8 @@ function addMessage(role, content) {
 
     div.appendChild(bubble);
     $messagesInner.appendChild(div);
+    enhanceCodeBlocks(div);
     scrollToBottom();
-
-    // Highlight code blocks
-    if (window.hljs) {
-        div.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-    }
 }
 
 function ensureStreamMessage() {
@@ -245,9 +338,7 @@ function ensureStreamMessage() {
 function renderStreamText(text) {
     const bubble = ensureStreamMessage();
     bubble.innerHTML = renderMarkdown(text || '');
-    if (window.hljs && streamMessageEl) {
-        streamMessageEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-    }
+    enhanceCodeBlocks(streamMessageEl);
     currentTurnHadRichReply = true;
     scrollToBottom();
 }
@@ -599,11 +690,8 @@ function addBackgroundMessage(data) {
     }
 
     $messagesInner.appendChild(div);
+    enhanceCodeBlocks(div);
     scrollToBottom();
-
-    if (window.hljs) {
-        div.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-    }
 }
 
 function getLastUserMessage() {

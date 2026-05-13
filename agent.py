@@ -26,10 +26,18 @@ from tools.code_intel.code_index import LazyCodeIndex
 
 
 # Tools that modify files — require diff preview + confirmation
-DIFF_TOOLS = {"edit_file", "write_file", "delete_file"}
+DIFF_TOOLS = {"edit_file", "write_file", "delete_file", "apply_patch"}
 
 # Tools that run external commands — require showing the command + confirmation
-CONFIRM_TOOLS = {"execute_shell", "execute_python", "git_add", "git_commit", "git_push"}
+CONFIRM_TOOLS = {
+    "execute_shell",
+    "execute_python",
+    "run_command",
+    "stop_background_command",
+    "git_add",
+    "git_commit",
+    "git_push",
+}
 
 # Tools that have a built-in preview/confirm flow — always preview first
 PREVIEW_TOOLS = {"move_path"}
@@ -537,7 +545,11 @@ class Agent:
             "Call get_project_tree when you need a map of the repo.\n\n"
             f"{identity_block}"
             "Rules:\n"
-            "- Prefer find_definition, find_usages, get_file_structure, search_symbols, find_imports, and get_call_graph for code questions. Use search_file_contents only for plain text searches.\n"
+            "- For project overview questions, especially test/build/lint/dev command discovery, package manager detection, frameworks, entry points, or repo health, call inspect_project first. Use list_directory, rg_search, or file reads only after inspect_project if more detail is needed.\n"
+            "- Prefer find_definition, find_usages_context, get_file_structure, read_symbol, search_symbols, find_imports, code_index_summary, and get_call_graph for code questions. Use rg_search for fast text search and search_file_contents only as a fallback/plain text search.\n"
+            "- When the user asks where a function/class/method is implemented and asks to read, show, extract, summarize, or inspect its body/source, do not stop at find_definition. Follow the definition lookup with read_symbol; use read_file_range only if read_symbol is ambiguous or unavailable.\n"
+            "- For git status, commit summaries, changed-file reviews, commit planning, branch state, upstream state, or push readiness, prefer git_preflight, git_status, show_diff, and git_log. Do not use run_command for raw git status/diff/log unless the dedicated git tools cannot answer the request.\n"
+            "- Use run_command for tests, builds, linters, type checks, scripts, and dev servers after choosing the command with inspect_project or the relevant project config.\n"
             "- Use recall to check saved memory when the user asks about something you might have saved. If recall does not find it and the user is asking about something mentioned in a past chat, use deep_memory to search raw conversation history. When the user wants to add to or change something already saved, recall first to find it, then use update_memory instead of creating a duplicate.\n"
             "- After completing an action (commit, delete, edit, etc.), always confirm what happened.\n"
             "- If the user declines a tool action, do NOT retry or try alternatives. Just respond.\n"
@@ -569,8 +581,10 @@ class Agent:
                 f"Using {tool_name} on {tool_inputs.get('source_path', '?')} -> "
                 f"{tool_inputs.get('destination_path', '?')}."
             )
-        if tool_name == "execute_shell":
+        if tool_name in {"execute_shell", "run_command"}:
             command = str(tool_inputs.get("command", "")).strip()
+            if not command and isinstance(tool_inputs.get("args"), list):
+                command = " ".join(str(part) for part in tool_inputs.get("args", []))
             if command:
                 return f"Using {tool_name}: {command[:120]}"
         if tool_name == "browser_automation":
@@ -586,6 +600,13 @@ class Agent:
         data = tool_result.get("data", {}) or {}
         if data.get("skipped"):
             return (f"{tool_name} was skipped.", False)
+        if data.get("success") is False:
+            detail = data.get("error") or data.get("stderr") or data.get("error_type") or "command failed"
+            return (f"{tool_name} failed: {str(detail)[:180]}", True)
+        for failure_flag in ("pushed", "pulled", "committed", "added", "initialized"):
+            if data.get(failure_flag) is False and (data.get("error") or data.get("error_type")):
+                detail = data.get("error") or data.get("stderr") or data.get("error_type")
+                return (f"{tool_name} failed: {str(detail)[:180]}", True)
         if "count" in data:
             return (f"{tool_name} found {data['count']} result(s).", False)
         if data.get("bytes_written"):
@@ -947,6 +968,11 @@ class Agent:
             preview = _preview_write(tool_inputs)
         elif tool_name == "delete_file":
             preview = _preview_delete(tool_inputs)
+        elif tool_name == "apply_patch":
+            preview_result = self.execute_tool(tool_name, {**tool_inputs, "dry_run": True})
+            if not preview_result.get("success"):
+                return preview_result
+            preview = preview_result.get("data", {})
 
         if preview and preview.get("diff") and (approvals_required or force_approval):
             # For new file creation, skip the diff and show a simpler confirmation
@@ -985,6 +1011,8 @@ class Agent:
         # For delete_file, inject confirm=True so it actually deletes
         if tool_name == "delete_file":
             tool_inputs["confirm"] = True
+        if tool_name == "apply_patch":
+            tool_inputs["dry_run"] = False
 
         return self.execute_tool(tool_name, tool_inputs)
 
@@ -1056,8 +1084,10 @@ class Agent:
     def _tool_always_requires_approval(self, tool_name: str, tool_inputs: dict) -> bool:
         if tool_name in PROTECTED_APPROVAL_TOOLS:
             return True
-        if tool_name == "execute_shell":
+        if tool_name in {"execute_shell", "run_command"}:
             command = str(tool_inputs.get("command", "") or "")
+            if not command and isinstance(tool_inputs.get("args"), list):
+                command = " ".join(str(part) for part in tool_inputs.get("args", []))
             return bool(PROTECTED_SHELL_COMMAND_RE.search(command))
         return False
 
@@ -1365,6 +1395,19 @@ class Agent:
                             changed_path = tool_inputs.get("path")
                             if changed_path and tool_result.get("success"):
                                 self.code_index.update_file(changed_path)
+                        elif tool_name == "apply_patch" and tool_result.get("success"):
+                            for item in tool_result.get("data", {}).get("changed_files", []):
+                                changed_path = item.get("path")
+                                if changed_path:
+                                    self.code_index.update_file(changed_path)
+                                old_path = item.get("old_path")
+                                if old_path and old_path != changed_path:
+                                    self.code_index.update_file(old_path)
+                        elif tool_name == "move_path" and tool_result.get("success"):
+                            data = tool_result.get("data", {})
+                            for changed_path in (data.get("source_path"), data.get("destination_path")):
+                                if changed_path:
+                                    self.code_index.update_file(changed_path)
 
                         if self.verbose:
                             print(f"  [tool result] {json.dumps(tool_result)[:200]}")
