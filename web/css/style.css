@@ -481,6 +481,8 @@ body {
     background: transparent;
     padding: 26px 24px 0;
     display: flex;
+    flex-direction: column;
+    align-items: center;
     justify-content: center;
     opacity: 1;
     transform: translateY(0);
@@ -583,6 +585,30 @@ body {
     border-bottom-right-radius: 6px;
     max-width: 75%;
     font-size: 15px;
+}
+
+.message.user.image-message .bubble {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: min(75%, 420px);
+    padding: 8px;
+    border-radius: 16px;
+    border-bottom-right-radius: 6px;
+}
+
+.user-attached-image {
+    display: block;
+    width: 100%;
+    max-height: min(42vh, 320px);
+    border-radius: 11px;
+    object-fit: contain;
+    background: #120e1e;
+}
+
+.user-photo-caption {
+    padding: 0 8px 4px;
+    color: var(--text-primary);
 }
 
 .message-reaction {
@@ -1058,6 +1084,9 @@ body {
         linear-gradient(180deg, rgba(14, 11, 22, 0.92) 0%, rgba(14, 11, 22, 0.98) 100%);
     padding: 14px 24px 22px;
     flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
 }
 
 .composer {
@@ -1117,6 +1146,93 @@ body {
     justify-content: center;
     flex-shrink: 0;
     transition: background 0.15s;
+}
+
+.photo-input {
+    display: none;
+}
+
+.photo-btn {
+    align-self: center;
+    background: rgba(176, 124, 216, 0.12);
+    color: var(--accent-light);
+    border: 1px solid rgba(176, 124, 216, 0.26);
+    font-size: 24px;
+    line-height: 1;
+    font-weight: 400;
+}
+
+.photo-btn:hover {
+    background: rgba(176, 124, 216, 0.22);
+    color: #f2ddff;
+}
+
+.photo-btn.has-photo {
+    background: rgba(74, 222, 128, 0.12);
+    border-color: rgba(74, 222, 128, 0.34);
+    color: var(--success);
+}
+
+.photo-preview {
+    width: 100%;
+    max-width: var(--content-width);
+    margin: 10px auto 0;
+    display: flex;
+    justify-content: center;
+}
+
+.photo-preview-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    width: min(100%, 620px);
+    min-height: 64px;
+    padding: 8px 10px 8px 8px;
+    border: 1px solid rgba(176, 124, 216, 0.28);
+    border-radius: var(--radius-sm);
+    background: rgba(20, 15, 31, 0.96);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+}
+
+.photo-preview-thumb {
+    width: 52px;
+    height: 52px;
+    border-radius: 7px;
+    object-fit: cover;
+    background: #120e1e;
+    border: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+}
+
+.photo-preview-name {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.photo-preview-remove {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.photo-preview-remove:hover {
+    background: rgba(248, 113, 113, 0.12);
+    border-color: rgba(248, 113, 113, 0.35);
+    color: #f9b0b0;
 }
 
 .send-btn {
@@ -1938,6 +2054,10 @@ body {
         max-width: 90%;
     }
 
+    .message.user.image-message .bubble {
+        max-width: 90%;
+    }
+
     .messages {
         padding: 16px 12px 8px;
     }
@@ -1948,6 +2068,10 @@ body {
 
     .chat-view-centered .composer-wrapper {
         padding: 16px 12px 0;
+    }
+
+    .photo-preview-card {
+        width: 100%;
     }
 
     .empty-headline {

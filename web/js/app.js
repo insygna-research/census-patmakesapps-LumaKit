@@ -11,6 +11,9 @@ const $messagesInner = document.getElementById('messages-inner');
 const $emptyState = document.getElementById('empty-state');
 const $input = document.getElementById('input');
 const $sendBtn = document.getElementById('send-btn');
+const $photoInput = document.getElementById('photo-input');
+const $photoBtn = document.getElementById('photo-btn');
+const $photoPreview = document.getElementById('photo-preview');
 const $chatList = document.getElementById('chat-list');
 const $newChatBtn = document.getElementById('new-chat-btn');
 const $topbarTitle = document.getElementById('topbar-title');
@@ -63,6 +66,7 @@ let requiresModelSetup = false;
 let pendingSettingsFocus = false;
 let lastEmptyPromptIndex = -1;
 let emptyStateDismissTimer = null;
+let attachedPhoto = null;
 
 const EMPTY_STATE_PROMPTS = [
     {
@@ -78,6 +82,7 @@ const EMPTY_STATE_PROMPTS = [
         subcopy: 'Start with a goal and let the purple creature get to work.',
     },
 ];
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 
 // --- Markdown setup ---
 if (window.marked) {
@@ -211,6 +216,7 @@ function setWorking(working) {
     isWorking = working;
     if ($workspaceInput) $workspaceInput.disabled = working;
     if ($workspaceBrowse) $workspaceBrowse.disabled = working;
+    if ($photoBtn) $photoBtn.disabled = working;
     // Type /stop to interrupt — no UI toggle needed
 }
 
@@ -244,6 +250,7 @@ function applySetupState() {
     $input.disabled = blocked;
     $sendBtn.disabled = blocked;
     $newChatBtn.disabled = blocked;
+    if ($photoBtn) $photoBtn.disabled = blocked || isWorking;
     if (blocked) {
         $input.placeholder = 'Choose a model in Settings before chatting...';
         const viewingSettings = currentView === 'settings';
@@ -337,6 +344,42 @@ function addMessage(role, content) {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.innerHTML = renderMarkdown(content);
+
+    div.appendChild(bubble);
+    $messagesInner.appendChild(div);
+    enhanceCodeBlocks(div);
+    scrollToBottom();
+}
+
+function addUserPhotoMessage(text, photo) {
+    if (!photo) {
+        addMessage('user', text);
+        return;
+    }
+    if ($emptyState && !$emptyState.classList.contains('hidden')) {
+        dismissEmptyState();
+    }
+    removeStatus();
+
+    const div = document.createElement('div');
+    div.className = 'message user image-message';
+    div.dataset.role = 'user';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble user-photo-bubble';
+
+    const image = document.createElement('img');
+    image.className = 'user-attached-image';
+    image.src = photo.data_url;
+    image.alt = photo.name || 'Attached photo';
+    bubble.appendChild(image);
+
+    if (text) {
+        const caption = document.createElement('div');
+        caption.className = 'user-photo-caption';
+        caption.innerHTML = renderMarkdown(text);
+        bubble.appendChild(caption);
+    }
 
     div.appendChild(bubble);
     $messagesInner.appendChild(div);
@@ -855,6 +898,7 @@ function clearMessages() {
     enterCenteredMode();
     currentTurnHadRichReply = false;
     clearActivityCard();
+    clearAttachedPhoto();
 }
 
 // --- Views ---
@@ -1560,11 +1604,68 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+// --- Photo attachments ---
+function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('Could not read image'));
+        reader.readAsDataURL(file);
+    });
+}
+
+async function attachPhotoFile(file) {
+    if (!file) return;
+    if (!file.type?.startsWith('image/')) {
+        showStatus('Choose an image file.');
+        return;
+    }
+    if (file.size > MAX_PHOTO_BYTES) {
+        showStatus('Images need to be 10 MB or smaller.');
+        return;
+    }
+    const dataUrl = await fileToDataUrl(file);
+    attachedPhoto = {
+        name: file.name || 'Pasted image',
+        type: file.type || 'image/png',
+        size: file.size || 0,
+        data_url: dataUrl,
+    };
+    renderAttachedPhoto();
+}
+
+function renderAttachedPhoto() {
+    if (!$photoPreview) return;
+    $photoBtn?.classList.toggle('has-photo', !!attachedPhoto);
+    if (!attachedPhoto) {
+        $photoPreview.classList.add('hidden');
+        $photoPreview.innerHTML = '';
+        return;
+    }
+
+    $photoPreview.classList.remove('hidden');
+    $photoPreview.innerHTML = `
+        <div class="photo-preview-card">
+            <img class="photo-preview-thumb" src="${attachedPhoto.data_url}" alt="">
+            <div class="photo-preview-name">${escapeHtml(attachedPhoto.name || 'Attached photo')}</div>
+            <button class="photo-preview-remove" type="button" title="Remove photo" aria-label="Remove photo">&times;</button>
+        </div>
+    `;
+    $photoPreview.querySelector('.photo-preview-remove')?.addEventListener('click', clearAttachedPhoto);
+}
+
+function clearAttachedPhoto() {
+    attachedPhoto = null;
+    if ($photoInput) $photoInput.value = '';
+    renderAttachedPhoto();
+}
+
 // --- Send message ---
 // Users can send multiple messages in a row without waiting for a response.
 function sendMessage() {
     const text = $input.value.trim();
-    if (!text) return;
+    const photo = attachedPhoto;
+    if (!text && !photo) return;
     if (requiresModelSetup) {
         switchView('settings');
         return;
@@ -1577,14 +1678,26 @@ function sendMessage() {
         currentTurnHadRichReply = false;
         clearActivityCard();
     }
-    addMessage('user', text);
-    ws.send({ type: 'message', text });
+    addUserPhotoMessage(text || 'What do you see in this image?', photo);
+    ws.send({ type: 'message', text, image: photo });
     $input.value = '';
     $input.style.height = 'auto';
+    clearAttachedPhoto();
     setWorking(true);
 }
 
 $sendBtn.onclick = sendMessage;
+$photoBtn?.addEventListener('click', () => $photoInput?.click());
+$photoInput?.addEventListener('change', async () => {
+    const file = $photoInput.files?.[0];
+    if (!file) return;
+    try {
+        await attachPhotoFile(file);
+    } catch (e) {
+        console.error('Failed to attach photo', e);
+        showStatus('Could not attach that image.');
+    }
+});
 
 $workspaceForm?.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1603,6 +1716,27 @@ $input.addEventListener('keydown', (e) => {
         e.preventDefault();
         sendMessage();
     }
+});
+
+$input.addEventListener('paste', async (e) => {
+    const file = Array.from(e.clipboardData?.files || []).find(item => item.type?.startsWith('image/'));
+    if (!file) return;
+    e.preventDefault();
+    try {
+        await attachPhotoFile(file);
+    } catch (err) {
+        console.error('Failed to paste photo', err);
+        showStatus('Could not paste that image.');
+    }
+});
+
+document.addEventListener('keydown', async (e) => {
+    if (!(e.altKey && e.key.toLowerCase() === 'v')) return;
+    if (requiresModelSetup) return;
+    e.preventDefault();
+    // Browsers require a permission prompt for programmatic clipboard reads.
+    // Use the native paste event for clipboard images, and make Alt+V a picker shortcut.
+    $photoInput?.click();
 });
 
 // Auto-resize textarea

@@ -7,6 +7,8 @@ Opens a web UI at http://localhost:7865.
 """
 
 import asyncio
+import base64
+import binascii
 import contextvars
 import json
 import os
@@ -65,6 +67,7 @@ WEB_DIR = _REPO_ROOT / "web"
 WEB_MEDIA_DIR = get_data_dir() / "web_media"
 WEB_URL = f"http://localhost:{PORT}"
 STRUQT_TERM_RE = re.compile(r"\b(?:struqt|struct|strukt|struq|st?ruqt)\b", re.IGNORECASE)
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 
 app = FastAPI(title="LumaKit")
 
@@ -142,6 +145,24 @@ def _workspace_payload(path: str | Path) -> dict:
         "workspace_path": str(root),
         "workspace_display": str(root),
     }
+
+
+def _decode_image_payload(payload: dict | None) -> bytes | None:
+    if not isinstance(payload, dict):
+        return None
+    data_url = str(payload.get("data_url") or "").strip()
+    if not data_url:
+        return None
+    if "," in data_url:
+        header, encoded = data_url.split(",", 1)
+        if not header.lower().startswith("data:image/"):
+            raise ValueError("Only image uploads are supported.")
+    else:
+        encoded = data_url
+    image_data = base64.b64decode(encoded, validate=True)
+    if len(image_data) > MAX_IMAGE_UPLOAD_BYTES:
+        raise ValueError("Image upload is too large.")
+    return image_data
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +838,7 @@ async def websocket_chat(ws: WebSocket):
         for n in missed:
             await ws.send_json(_notification_to_web_event(n))
 
-    async def run_agent_request(text: str):
+    async def run_agent_request(text: str, image_data: bytes | None = None):
         """Run the agent in a worker thread and emit the response when it finishes.
         This is fired as a separate task so the receive loop stays alive and can
         process confirm_response / stop messages while the agent is working."""
@@ -827,11 +848,21 @@ async def websocket_chat(ws: WebSocket):
             # react context) so the worker thread sees them. run_in_executor
             # does NOT propagate contextvars by default.
             ctx = contextvars.copy_context()
-            response = await loop.run_in_executor(None, ctx.run, agent.ask_llm, text)
+            if image_data:
+                response = await loop.run_in_executor(
+                    None,
+                    ctx.run,
+                    agent.ask_llm_with_image,
+                    text or None,
+                    image_data,
+                    None,
+                )
+            else:
+                response = await loop.run_in_executor(None, ctx.run, agent.ask_llm, text)
             reply = response.get("message", {}).get("content", "")
             session["messages"] = agent.messages
             if not session["first_message_sent"]:
-                session["title"] = make_title(text)
+                session["title"] = make_title(text or "Photo")
                 session["first_message_sent"] = True
             save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
             set_active_chat(WEB_USER_ID, session["chat_id"])
@@ -1001,18 +1032,25 @@ async def websocket_chat(ws: WebSocket):
             # Regular chat message
             if msg_type == "message":
                 text = data.get("text", "").strip()
-                if not text:
+                image_payload = data.get("image")
+                try:
+                    image_data = _decode_image_payload(image_payload)
+                except (ValueError, binascii.Error):
+                    await ws.send_json({"type": "error", "text": "Invalid image upload."})
+                    continue
+
+                if not text and not image_data:
                     continue
 
                 normalized = text.lower()
-                if normalized in _EMAIL_AFFIRM and email_draft_store.get_latest_pending():
+                if not image_data and normalized in _EMAIL_AFFIRM and email_draft_store.get_latest_pending():
                     await ws.send_json(_handle_email_draft_action("approve"))
                     continue
-                if normalized in _EMAIL_DENY and email_draft_store.get_latest_pending():
+                if not image_data and normalized in _EMAIL_DENY and email_draft_store.get_latest_pending():
                     await ws.send_json(_handle_email_draft_action("discard"))
                     continue
 
-                fast_reply = _try_fast_struqt_intent(text)
+                fast_reply = None if image_data else _try_fast_struqt_intent(text)
                 if fast_reply is not None:
                     user_message = timestamp_message({"role": "user", "content": text})
                     assistant_message = timestamp_message({"role": "assistant", "content": fast_reply})
@@ -1042,6 +1080,9 @@ async def websocket_chat(ws: WebSocket):
                     # Always forward the user's message — let the model read it
                     # and decide whether it's a stop, a status question, or
                     # new guidance. No keyword classifier.
+                    if image_data:
+                        await ws.send_json({"type": "error", "text": "Wait for the current run to finish before sending a photo."})
+                        continue
                     if not agent.run_controller.submit_guidance(text):
                         # Run finished between the check and the submit — fall
                         # through and treat this as a fresh turn.
@@ -1049,12 +1090,12 @@ async def websocket_chat(ws: WebSocket):
                         agent_task = asyncio.create_task(run_agent_request(text))
                     continue
 
-                await ws.send_json({"type": "status", "text": "Lumi is thinking..."})
+                await ws.send_json({"type": "status", "text": "Lumi is looking at the image..." if image_data else "Lumi is thinking..."})
 
                 # Spawn as a task so the receive loop keeps running — this is
                 # what lets confirm_response / stop messages get processed while
                 # the agent is working.
-                agent_task = asyncio.create_task(run_agent_request(text))
+                agent_task = asyncio.create_task(run_agent_request(text, image_data))
                 continue
 
     except WebSocketDisconnect:

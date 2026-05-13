@@ -57,11 +57,14 @@
             </div>
             <div class="composer-wrapper">
                 <div id="composer" class="composer">
+                    <input id="photo-input" class="photo-input" type="file" accept="image/*">
+                    <button id="photo-btn" class="composer-btn photo-btn" type="button" title="Attach photo" aria-label="Attach photo">+</button>
                     <textarea id="input" class="composer-input" placeholder="Message Lumi... (type /stop to interrupt)" rows="1"></textarea>
                     <button id="send-btn" class="composer-btn send-btn" title="Send (type /stop to interrupt)">
                         <img src="/photos/down_arrow.png" alt="" class="send-btn-icon">
                     </button>
                 </div>
+                <div id="photo-preview" class="photo-preview hidden"></div>
             </div>
         </div>
 
