@@ -1105,37 +1105,59 @@ async function loadSettings() {
                     Delete file and git stage, commit, and push always require approval.
                 </div>
             </div>
-            <div class="setting-row">
-                <span class="setting-label">Effective Primary Model</span>
-                <span class="setting-value">${settings.model || 'not set'} <span class="setting-source">(${settings.model_source || 'unknown'})</span></span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">Effective Fallback Model</span>
-                <span class="setting-value">${settings.fallback_model || 'none'} <span class="setting-source">(${settings.fallback_model_source || 'unknown'})</span></span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">App Primary Override</span>
-                <span class="setting-value">${settings.app_primary_model || 'none'}</span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">App Fallback Override</span>
-                <span class="setting-value">${settings.app_fallback_model || 'none'}</span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">.env Primary Model</span>
-                <span class="setting-value">${settings.env_primary_model || 'not set'}</span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">.env Fallback Model</span>
-                <span class="setting-value">${settings.env_fallback_model || 'none'}</span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">Optional Local Model</span>
-                <span class="setting-value">${settings.local_model || 'not set'}</span>
-            </div>
-            <div class="setting-row">
-                <span class="setting-label">Data Directory</span>
-                <span class="setting-value">${settings.data_dir}</span>
+            <div class="settings-card">
+                <h3>Current Configuration</h3>
+                <div class="settings-note">
+                    A read-only view of what LumaKit is actually using right now, and where each value came from.
+                </div>
+
+                <div class="settings-subgroup">
+                    <div class="settings-subgroup-label">Active models</div>
+                    <div class="setting-row">
+                        <span class="setting-label">Primary</span>
+                        <span class="setting-value">${settings.model || 'not set'} <span class="setting-source-pill">${settings.model_source || 'unknown'}</span></span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Fallback</span>
+                        <span class="setting-value">${settings.fallback_model || 'none'} <span class="setting-source-pill">${settings.fallback_model_source || 'unknown'}</span></span>
+                    </div>
+                </div>
+
+                <div class="settings-subgroup">
+                    <div class="settings-subgroup-label">App overrides <span class="settings-subgroup-hint">(set via this Settings page)</span></div>
+                    <div class="setting-row">
+                        <span class="setting-label">Primary override</span>
+                        <span class="setting-value">${settings.app_primary_model || 'none'}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Fallback override</span>
+                        <span class="setting-value">${settings.app_fallback_model || 'none'}</span>
+                    </div>
+                </div>
+
+                <div class="settings-subgroup">
+                    <div class="settings-subgroup-label">From .env <span class="settings-subgroup-hint">(defaults shipped with the project)</span></div>
+                    <div class="setting-row">
+                        <span class="setting-label">Primary</span>
+                        <span class="setting-value">${settings.env_primary_model || 'not set'}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Fallback</span>
+                        <span class="setting-value">${settings.env_fallback_model || 'none'}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Optional local model</span>
+                        <span class="setting-value">${settings.local_model || 'not set'}</span>
+                    </div>
+                </div>
+
+                <div class="settings-subgroup">
+                    <div class="settings-subgroup-label">System</div>
+                    <div class="setting-row">
+                        <span class="setting-label">Data directory</span>
+                        <span class="setting-value">${settings.data_dir}</span>
+                    </div>
+                </div>
             </div>
         `;
 
