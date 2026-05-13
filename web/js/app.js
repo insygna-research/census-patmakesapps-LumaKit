@@ -18,6 +18,8 @@ const $chatList = document.getElementById('chat-list');
 const $newChatBtn = document.getElementById('new-chat-btn');
 const $topbarTitle = document.getElementById('topbar-title');
 const $modelBadge = document.getElementById('model-badge');
+const $modelBadgeText = $modelBadge?.querySelector('.model-badge-text') || $modelBadge;
+const $statusLabel = document.getElementById('status-label');
 const $statusDot = document.getElementById('status-dot');
 const $workspaceForm = document.getElementById('workspace-form');
 const $workspaceInput = document.getElementById('workspace-input');
@@ -70,18 +72,26 @@ let attachedPhoto = null;
 
 const EMPTY_STATE_PROMPTS = [
     {
+        headline: 'Your local AI agent is ready.',
+        subcopy: 'Cat-powered automation, right from your machine.',
+    },
+    {
+        headline: 'Local-first automation.',
+        subcopy: 'Plan, search, write, and run — without leaving your machine.',
+    },
+    {
         headline: 'Give the cat a mission.',
-        subcopy: 'Ask a question, hand over a task, or start with a command.',
-    },
-    {
-        headline: 'Summon chaos responsibly.',
-        subcopy: 'Lumi can plan, search, write, and run with tools when you point at the job.',
-    },
-    {
-        headline: 'Cat-powered automation.',
-        subcopy: 'Start with a goal and let the purple creature get to work.',
+        subcopy: 'Hand over a task and let Lumi get to work.',
     },
 ];
+
+const HERO_IMAGES = [
+    '/photos/lumakit_hero.png',
+    '/photos/lumakit_lava.png',
+    '/photos/lumarock.png',
+    '/photos/lumaskate.png',
+];
+let lastHeroIndex = -1;
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 
 // --- Markdown setup ---
@@ -240,8 +250,12 @@ function setWorkspace(path, displayPath) {
 function showWorkspaceError(message) {
     if ($workspaceInput) {
         $workspaceInput.classList.add('error');
+        $workspaceForm?.classList.add('error');
         $workspaceInput.title = message || 'Could not set working directory.';
-        window.setTimeout(() => $workspaceInput.classList.remove('error'), 1800);
+        window.setTimeout(() => {
+            $workspaceInput.classList.remove('error');
+            $workspaceForm?.classList.remove('error');
+        }, 1800);
     }
 }
 
@@ -317,6 +331,24 @@ function rotateEmptyPrompt() {
 function exitCenteredMode() {
     const chatView = document.getElementById('chat-view');
     chatView.classList.remove('chat-view-centered');
+    document.getElementById('hero-bg')?.classList.remove('ready');
+}
+
+function rotateHeroBackground() {
+    const heroEl = document.getElementById('hero-bg');
+    if (!heroEl || HERO_IMAGES.length === 0) return;
+    let index = Math.floor(Math.random() * HERO_IMAGES.length);
+    if (HERO_IMAGES.length > 1 && index === lastHeroIndex) {
+        index = (index + 1) % HERO_IMAGES.length;
+    }
+    lastHeroIndex = index;
+    const src = HERO_IMAGES[index];
+    const img = new Image();
+    img.onload = () => {
+        heroEl.style.setProperty('--hero-img', `url("${src}")`);
+        heroEl.classList.add('ready');
+    };
+    img.src = src;
 }
 
 function enterCenteredMode() {
@@ -329,6 +361,7 @@ function enterCenteredMode() {
     chatView.classList.add('chat-view-centered');
     $emptyState?.classList.remove('hidden', 'is-exiting');
     rotateEmptyPrompt();
+    rotateHeroBackground();
 }
 
 function addMessage(role, content) {
@@ -921,9 +954,15 @@ async function loadChatList() {
         const res = await fetch('/api/chats');
         const chats = await res.json();
         $chatList.innerHTML = '';
+        const label = document.querySelector('.chat-list-label');
+        if (label) label.classList.toggle('visible', chats.length > 0);
         for (const chat of chats) {
             const item = document.createElement('div');
             item.className = `chat-item${chat.id === currentChatId ? ' active' : ''}`;
+
+            const icon = document.createElement('span');
+            icon.className = 'chat-item-icon';
+            icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></svg>';
 
             const title = document.createElement('span');
             title.className = 'chat-item-title';
@@ -953,6 +992,7 @@ async function loadChatList() {
                 }
             };
 
+            item.appendChild(icon);
             item.appendChild(title);
             item.appendChild(del);
             $chatList.appendChild(item);
@@ -1245,13 +1285,13 @@ async function loadHealth() {
     try {
         const res = await fetch('/api/health');
         const data = await res.json();
-        $modelBadge.textContent = data.model || 'unknown';
+        $modelBadgeText.textContent = data.model || 'unknown';
         if (typeof data.setup_required === 'boolean') {
             requiresModelSetup = data.setup_required;
             applySetupState();
         }
     } catch (e) {
-        $modelBadge.textContent = 'offline';
+        $modelBadgeText.textContent = 'offline';
     }
 }
 
@@ -1287,6 +1327,7 @@ function stopNotificationPolling() {
 const ws = new WS({
     onConnect() {
         $statusDot.classList.remove('disconnected');
+        if ($statusLabel) $statusLabel.textContent = 'Connected';
         loadChatList();
         loadHealth();
         startNotificationPolling();
@@ -1294,6 +1335,7 @@ const ws = new WS({
 
     onDisconnect() {
         $statusDot.classList.add('disconnected');
+        if ($statusLabel) $statusLabel.textContent = 'Offline';
         stopNotificationPolling();
     },
 
@@ -1312,7 +1354,7 @@ const ws = new WS({
                 ? ` (requested ${data.model_requested})`
                 : '';
             appendActivityLine(`Model used: ${data.model_used}${requested}`, 'status');
-            $modelBadge.textContent = data.model_used;
+            $modelBadgeText.textContent = data.model_used;
         }
         removeStatus();
         const text = (data.text || '').trim();
@@ -1687,6 +1729,16 @@ function sendMessage() {
 }
 
 $sendBtn.onclick = sendMessage;
+
+document.querySelectorAll('.suggestion-card').forEach(card => {
+    card.addEventListener('click', () => {
+        const prompt = card.getAttribute('data-prompt') || '';
+        if (!prompt) return;
+        $input.value = prompt;
+        $input.focus();
+        sendMessage();
+    });
+});
 $photoBtn?.addEventListener('click', () => $photoInput?.click());
 $photoInput?.addEventListener('change', async () => {
     const file = $photoInput.files?.[0];

@@ -19,11 +19,21 @@
             <img src="/photos/lumakit_cat.png" alt="LumaKit" class="sidebar-logo">
             <span class="sidebar-title">LumaKit</span>
         </div>
-        <button id="new-chat-btn" class="new-chat-btn">+ New Chat</button>
+        <button id="new-chat-btn" class="new-chat-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            <span>New Chat</span>
+        </button>
+        <div class="chat-list-label">Recent</div>
         <nav id="chat-list" class="chat-list"></nav>
         <div class="sidebar-footer">
-            <button id="nav-tasks" class="sidebar-nav-btn">Tasks</button>
-            <button id="nav-settings" class="sidebar-nav-btn">Settings</button>
+            <button id="nav-tasks" class="sidebar-nav-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                <span>Tasks</span>
+            </button>
+            <button id="nav-settings" class="sidebar-nav-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+                <span>Settings</span>
+            </button>
         </div>
     </aside>
 
@@ -35,22 +45,31 @@
             <span id="topbar-title" class="topbar-title">New Chat</span>
             <div class="topbar-right">
                 <form id="workspace-form" class="workspace-form" title="Working directory for this chat">
+                    <svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
                     <input id="workspace-input" class="workspace-input" type="text" spellcheck="false" placeholder="Working directory">
-                    <button id="workspace-browse" class="workspace-save" type="button" title="Browse for folder">Browse&hellip;</button>
+                    <button id="workspace-browse" class="workspace-save" type="button" title="Browse for folder" aria-label="Browse for folder">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h18"/><path d="M13 5l7 7-7 7"/></svg>
+                    </button>
                 </form>
-                <span id="model-badge" class="model-badge" title="Open settings"></span>
-                <span id="status-dot" class="status-dot"></span>
+                <span id="model-badge" class="model-badge" title="Open settings">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+                    <span class="model-badge-text"></span>
+                </span>
+                <span class="status-indicator" title="Connection status">
+                    <span id="status-dot" class="status-dot"></span>
+                    <span id="status-label" class="status-label">Connected</span>
+                </span>
             </div>
         </header>
 
         <!-- Chat view -->
         <div id="chat-view" class="view active chat-view-centered">
+            <div id="hero-bg" class="hero-bg" aria-hidden="true"></div>
             <div id="messages" class="messages">
                 <div id="empty-state" class="empty-state">
-                    <img src="/photos/lumakit_cat_logo.png" alt="LumaKit" class="empty-logo">
                     <div class="empty-copy">
-                        <h1 id="empty-headline" class="empty-headline">Give the cat a mission.</h1>
-                        <p id="empty-subcopy" class="empty-subcopy">Ask a question, hand over a task, or start with a command.</p>
+                        <h1 id="empty-headline" class="empty-headline">Your local AI agent is ready.</h1>
+                        <p id="empty-subcopy" class="empty-subcopy">Cat-powered automation, right from your machine.</p>
                     </div>
                 </div>
                 <div id="messages-inner" class="messages-inner"></div>
@@ -59,9 +78,27 @@
                 <div id="composer" class="composer">
                     <input id="photo-input" class="photo-input" type="file" accept="image/*">
                     <button id="photo-btn" class="composer-btn photo-btn" type="button" title="Attach photo" aria-label="Attach photo">+</button>
-                    <textarea id="input" class="composer-input" placeholder="Message Lumi... (type /stop to interrupt)" rows="1"></textarea>
-                    <button id="send-btn" class="composer-btn send-btn" title="Send (type /stop to interrupt)">
-                        <img src="/photos/down_arrow.png" alt="" class="send-btn-icon">
+                    <textarea id="input" class="composer-input" placeholder="Ask Lumi to inspect this repo, run commands, or automate a task..." rows="1"></textarea>
+                    <button id="send-btn" class="composer-btn send-btn" title="Send (type /stop to interrupt)" aria-label="Send">
+                        <svg class="send-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+                    </button>
+                </div>
+                <div id="suggestion-cards" class="suggestion-cards">
+                    <button type="button" class="suggestion-card" data-prompt="Inspect this repo and tell me what it does.">
+                        <span class="suggestion-card-kicker">Explore</span>
+                        <span class="suggestion-card-text">Inspect this repo</span>
+                    </button>
+                    <button type="button" class="suggestion-card" data-prompt="Show me the current git status and a summary of recent commits.">
+                        <span class="suggestion-card-kicker">Git</span>
+                        <span class="suggestion-card-text">Show git status</span>
+                    </button>
+                    <button type="button" class="suggestion-card" data-prompt="Review my recent changes and suggest improvements.">
+                        <span class="suggestion-card-kicker">Review</span>
+                        <span class="suggestion-card-text">Review my changes</span>
+                    </button>
+                    <button type="button" class="suggestion-card" data-prompt="Help me plan a new feature for this project.">
+                        <span class="suggestion-card-kicker">Plan</span>
+                        <span class="suggestion-card-text">Plan a new feature</span>
                     </button>
                 </div>
                 <div id="photo-preview" class="photo-preview hidden"></div>
