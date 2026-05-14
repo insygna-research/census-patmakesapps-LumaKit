@@ -19,7 +19,7 @@ LumaKit is not just a terminal wrapper around Ollama. The normal experience is a
 
 ![Updated LumaKit Web UI](photos/updatedui_pic1.png)
 
-![LumaKit Web UI](photos/lumi_full_ui_screenshot.png)
+![LumaKit Web UI](photos/updatedfulluiscreenshot.png)
 
 The web UI is also where first-run model setup and later model switching now live:
 
