@@ -308,6 +308,22 @@ async def api_list_tasks():
     return task_store.get_all_tasks(limit=50)
 
 
+@app.get("/api/tasks/runner/health")
+async def api_runner_health():
+    from core.task_runner import get_active_runner
+    from datetime import datetime as _dt
+    runner = get_active_runner()
+    if not runner:
+        return {"running": False, "last_tick_at": None, "seconds_since_tick": None}
+    last = runner.get_last_tick_at()
+    secs = (_dt.now() - last).total_seconds() if last else None
+    return {
+        "running": True,
+        "last_tick_at": last.isoformat() if last else None,
+        "seconds_since_tick": secs,
+    }
+
+
 @app.get("/api/tasks/{task_id}")
 async def api_get_task(task_id: int):
     task = task_store.get_task(task_id)

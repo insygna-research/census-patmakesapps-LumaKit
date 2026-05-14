@@ -1288,6 +1288,21 @@ function renderTaskDetail(task) {
         }).join('')}</ol>`
         : '<p class="task-empty-note">No plan yet — Lumi will draft one shortly.</p>';
 
+    // Retry banner — only when the current step is in backoff after a runtime
+    // failure. Tells the user *why* the task isn't moving and when it'll try
+    // again, instead of leaving them to guess from "Active".
+    const currentStep = (plan && plan[task.current_step]) || null;
+    const retryCount = currentStep ? Number(currentStep.runtime_retries || 0) : 0;
+    const retryReason = currentStep ? (currentStep.last_runtime_error || '') : '';
+    const retryNext = currentStep ? (currentStep.next_retry_at || task.next_run_at || '') : '';
+    const retryBannerHtml = (!isTerminal && retryCount > 0 && retryReason)
+        ? `<div class="task-retry-banner">
+                <div><strong>Retrying step ${task.current_step + 1}</strong> — attempt ${retryCount}.
+                    Next try ${escapeHtml(formatFriendlyDate(retryNext) || retryNext || 'soon')}.</div>
+                <div class="task-retry-reason">${escapeHtml(retryReason)}</div>
+           </div>`
+        : '';
+
     const historyHtml = history.length
         ? history.slice().reverse().map(entry => renderHistoryEntry(entry)).join('')
         : '<p class="task-empty-note">No activity recorded yet.</p>';
@@ -1304,6 +1319,7 @@ function renderTaskDetail(task) {
 
     $taskPanelBody.innerHTML = `
         <div class="task-actions-row">${actionButtons.join('')}</div>
+        ${retryBannerHtml}
 
         <section class="task-panel-section">
             <h4>Details</h4>

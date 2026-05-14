@@ -37,6 +37,22 @@ PROTECTED_TASK_SHELL_RE = re.compile(
     r"\bgit\s+(add|commit|push)\b|\b(rm|del|erase|unlink)\b",
     re.IGNORECASE,
 )
+# Module-level handle to the active runner so non-service code paths
+# (the web API, chat tools) can read its heartbeat without plumbing the
+# service object through.
+_active_runner: "TaskRunner | None" = None
+
+
+def get_active_runner() -> "TaskRunner | None":
+    return _active_runner
+
+
+RETRYABLE_STEP_RUNTIME_RE = re.compile(
+    r"LLM error during step:|Cannot reach Ollama server|Ollama stopped responding|"
+    r"unable to reach Ollama|model server|connection refused|connection reset|"
+    r"timed out|timeout",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +155,9 @@ class TaskRunner:
 
     # How many times to retry a failed step before moving on
     MAX_STEP_RETRIES = 2
+    # How many times to retry transient model/runtime failures before failing
+    # the task. These are infrastructure failures, not user-blocking states.
+    MAX_RUNTIME_RETRIES = 12
     # How many times to retry a failed planning pass within a single tick
     MAX_PLAN_RETRIES = 2
     # How many planning ticks to retry with backoff before giving up entirely
@@ -166,7 +185,12 @@ class TaskRunner:
         self._notify = notify or (lambda msg, cid: print(f"[task] {msg}"))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()   # serializes LLM calls from this runner
+        # Per-task locks so one slow task can't block other tasks. Ollama
+        # concurrency is already serialized inside OllamaClient.
+        self._task_locks: dict[int, threading.Lock] = {}
+        self._task_locks_guard = threading.Lock()
+        # Heartbeat — surfaced via the API so the UI can detect a wedged thread.
+        self._last_tick_at: datetime | None = None
 
         # Lazy — built on first use so we don't slow down startup
         self._ollama: OllamaClient | None = None
@@ -186,6 +210,8 @@ class TaskRunner:
             self._log_catch_up()
         except Exception as e:
             print(f"[task-runner] catch-up scan failed: {e}")
+        global _active_runner
+        _active_runner = self
         self._thread = threading.Thread(target=self._loop, daemon=True, name="task-runner")
         self._thread.start()
 
@@ -199,6 +225,9 @@ class TaskRunner:
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        global _active_runner
+        if _active_runner is self:
+            _active_runner = None
 
     # ------------------------------------------------------------------
     # Main loop
@@ -213,22 +242,34 @@ class TaskRunner:
             self._stop.wait(self._interval)
 
     def _tick(self) -> None:
+        self._last_tick_at = datetime.now()
         # Check overdue tasks first (past due_at, not yet finalized)
         for task in task_store.get_overdue_tasks():
-            with self._lock:
+            with self._lock_for(task["id"]):
                 workspace = self._resolve_task_workspace_or_fallback(task)
                 with workspace_context(workspace):
                     self._finalize_overdue(task)
 
         # Then process tasks whose next_run_at has passed
         for task in task_store.get_due_tasks():
-            with self._lock:
+            with self._lock_for(task["id"]):
                 workspace = self._resolve_task_workspace_or_fallback(task)
                 with workspace_context(workspace):
                     if task["status"] == "planning":
                         self._run_planning(task)
                     elif task["status"] == "active":
                         self._run_step(task)
+
+    def _lock_for(self, task_id: int) -> threading.Lock:
+        with self._task_locks_guard:
+            lock = self._task_locks.get(task_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._task_locks[task_id] = lock
+        return lock
+
+    def get_last_tick_at(self) -> datetime | None:
+        return self._last_tick_at
 
     # ------------------------------------------------------------------
     # Planning pass
@@ -341,6 +382,14 @@ class TaskRunner:
         step = plan[step_idx]
         print(f"[task-runner] task {task_id} step {step_idx+1}/{len(plan)}: {step['description'][:60]}")
 
+        # Cheap pre-flight: if Ollama isn't reachable right now, don't burn a
+        # 180s LLM deadline finding that out. Reschedule on a short cadence
+        # instead so the task resumes promptly once the model is back.
+        probe_err = self._probe_ollama()
+        if probe_err is not None:
+            self._retry_step_runtime_error(task, step_idx, probe_err)
+            return
+
         history_summary = self._format_history_summary(task["history"])
         constraints_str = json.dumps(task["constraints"]) if task["constraints"] else "none"
 
@@ -362,11 +411,19 @@ class TaskRunner:
             step_output = f"Step execution error: {e}"
             print(f"[task-runner] step execution exception: {e}")
 
+        if self._is_retryable_step_runtime_error(step_output):
+            self._retry_step_runtime_error(task, step_idx, step_output)
+            return
+
         # Evaluate the output
         verdict_data = self._evaluate_step(step, step_output, owner_chat_id=task.get("owner_chat_id"))
         verdict = verdict_data.get("verdict", "failed")
         summary = verdict_data.get("summary", step_output[:200])
         reason = verdict_data.get("reason", "")
+
+        if verdict == "blocked" and self._is_retryable_step_runtime_error(reason):
+            self._retry_step_runtime_error(task, step_idx, reason)
+            return
 
         print(f"[task-runner] task {task_id} step {step_idx+1} verdict: {verdict} — {reason}")
 
@@ -433,6 +490,83 @@ class TaskRunner:
             task_store.update_task(task_id, next_run_at=next_run)
             self._notify(
                 f"Step {step_idx+1} partially done, continuing: {summary[:120]}",
+                task.get("owner_chat_id"),
+            )
+
+    def _is_retryable_step_runtime_error(self, text: str) -> bool:
+        return bool(RETRYABLE_STEP_RUNTIME_RE.search(str(text or "")))
+
+    def _probe_ollama(self) -> str | None:
+        """Quick reachability check for the model server. Returns None if up,
+        or a short error string the retry path can record as the reason.
+        Cloud-hosted models still need the local daemon as a proxy, so the
+        /api/tags endpoint is the right liveness signal for both.
+        """
+        try:
+            self._get_ollama().tags(request_timeout=2)
+            return None
+        except Exception as e:
+            return f"Ollama probe failed: {e}"
+
+    def _retry_step_runtime_error(self, task: dict, step_idx: int, error_text: str) -> None:
+        task_id = task["id"]
+        plan = task["plan"]
+        step = plan[step_idx]
+        retries = int(step.get("runtime_retries", 0)) + 1
+        step["runtime_retries"] = retries
+
+        summary = str(error_text or "Runtime error")[:300]
+        if retries > self.MAX_RUNTIME_RETRIES:
+            result = (
+                f"Task failed after {self.MAX_RUNTIME_RETRIES} retries because the model/runtime "
+                f"was unavailable while executing step {step_idx + 1}: {summary}"
+            )
+            task_store.append_history(task_id, {
+                "type": "step_result",
+                "step_index": step_idx,
+                "description": step.get("description", ""),
+                "verdict": "failed",
+                "summary": result,
+            })
+            task_store.fail_task(task_id, result)
+            self._notify(
+                f"Task failed: {task['title']}\n\n{result}",
+                task.get("owner_chat_id"),
+            )
+            return
+
+        # Backoff schedule (seconds) tuned for the common case: a brief
+        # connectivity blip or a hit cloud-quota window. Short upfront retries
+        # so the task resumes within seconds of the model coming back, then
+        # ramp to minute-scale once it's clearly a sustained outage.
+        backoff_secs = [30, 30, 60, 120, 300, 600, 900, 900, 900, 900, 900, 900]
+        secs = backoff_secs[min(retries - 1, len(backoff_secs) - 1)]
+        next_run_dt = datetime.now() + timedelta(seconds=secs)
+        next_run = next_run_dt.isoformat()
+
+        # Stash the latest error on the step so chat/UI surfaces can show
+        # *why* the task is waiting without scanning history.
+        step["last_runtime_error"] = summary
+        step["last_runtime_error_at"] = datetime.now().isoformat()
+        step["next_retry_at"] = next_run
+
+        task_store.update_task(task_id, plan=json.dumps(plan), next_run_at=next_run)
+        task_store.append_history(task_id, {
+            "type": "step_retry",
+            "step_index": step_idx,
+            "attempt": retries,
+            "reason": summary,
+            "next_run_at": next_run,
+            "backoff_seconds": secs,
+        })
+        if retries in {1, 3, 6, 12}:
+            wait_label = (
+                f"{secs}s" if secs < 60
+                else f"{secs // 60} minute{'s' if secs // 60 != 1 else ''}"
+            )
+            self._notify(
+                f"Temporary runtime issue on task '{task['title']}' step {step_idx + 1}; "
+                f"retrying in {wait_label} instead of blocking.",
                 task.get("owner_chat_id"),
             )
 

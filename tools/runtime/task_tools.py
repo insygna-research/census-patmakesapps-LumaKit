@@ -195,8 +195,10 @@ def _get_task_status(inputs: dict) -> dict:
     step_idx = task["current_step"]
 
     current_step_desc = ""
+    current_step_obj: dict = {}
     if plan and step_idx < len(plan):
-        current_step_desc = plan[step_idx].get("description", "")
+        current_step_obj = plan[step_idx] or {}
+        current_step_desc = current_step_obj.get("description", "")
 
     history_lines = []
     for h in history:
@@ -206,20 +208,54 @@ def _get_task_status(inputs: dict) -> dict:
             )
         elif h.get("type") == "plan_generated":
             history_lines.append(f"Plan created: {len(h.get('steps', []))} steps")
+        elif h.get("type") == "step_retry":
+            history_lines.append(
+                f"Step {h.get('step_index', '?')+1} retry #{h.get('attempt', '?')}: "
+                f"{h.get('reason', '')[:120]}"
+            )
+
+    # Derive a human-readable detail of *why* the task is in its current state.
+    # The chat agent should quote this verbatim instead of inventing schedule
+    # text, since next_run_at moves silently on retry.
+    runtime_retries = int(current_step_obj.get("runtime_retries", 0) or 0)
+    last_runtime_error = current_step_obj.get("last_runtime_error") or ""
+    next_run_at = task.get("next_run_at") or ""
+    if task["status"] == "active" and runtime_retries > 0 and last_runtime_error:
+        state_detail = (
+            f"Step {step_idx + 1} is waiting to retry after a runtime error "
+            f"(attempt {runtime_retries}). Reason: {last_runtime_error[:200]}. "
+            f"Next retry at {next_run_at}."
+        )
+    elif task["status"] == "active":
+        state_detail = (
+            f"Step {step_idx + 1} of {len(plan)} is scheduled to run at {next_run_at}."
+            if plan else "Active but no plan yet."
+        )
+    elif task["status"] == "planning":
+        state_detail = f"Plan is being generated. Next attempt at {next_run_at}."
+    elif task["status"] == "blocked":
+        state_detail = "Blocked waiting for user input."
+    elif task["status"] == "paused":
+        state_detail = "Paused by user."
+    else:
+        state_detail = task["status"]
 
     return {
         "id": task["id"],
         "title": task["title"],
         "goal": task["goal"],
         "status": task["status"],
+        "state_detail": state_detail,
         "due_at": task.get("due_at"),
         "workspace_path": task.get("workspace_path") or "",
         "current_step": f"{step_idx+1}/{len(plan)}" if plan else "N/A",
         "current_step_description": current_step_desc,
+        "current_step_runtime_retries": runtime_retries,
+        "current_step_last_error": last_runtime_error[:300],
         "steps_total": len(plan),
         "history_summary": "\n".join(history_lines) or "No steps run yet.",
         "result": task.get("result") or "",
-        "next_run_at": task.get("next_run_at") or "",
+        "next_run_at": next_run_at,
     }
 
 

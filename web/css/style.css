@@ -2067,6 +2067,30 @@ body {
     box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
+.task-retry-banner {
+    background: rgba(192, 133, 64, 0.18);
+    border: 1px solid #c08540;
+    color: #f0c98a;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin: 0 0 10px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.task-retry-banner strong {
+    color: #ffd699;
+}
+
+.task-retry-banner .task-retry-reason {
+    font-family: var(--mono, monospace);
+    font-size: 11px;
+    color: #c8b48a;
+    word-break: break-word;
+}
+
 .task-plan-step.done {
     opacity: 0.65;
 }
