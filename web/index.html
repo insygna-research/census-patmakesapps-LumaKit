@@ -108,7 +108,10 @@
         <!-- Task view -->
         <div id="task-view" class="view">
             <div class="panel-content">
-                <h2>Tasks</h2>
+                <div class="task-header">
+                    <h2>Tasks</h2>
+                    <button id="new-task-btn" class="task-action-btn" type="button">+ New Task</button>
+                </div>
                 <div id="task-list" class="task-list"></div>
             </div>
         </div>
@@ -151,6 +154,66 @@
         </footer>
     </aside>
     <div id="diff-panel-backdrop" class="diff-panel-backdrop hidden"></div>
+
+    <!-- Task detail side panel -->
+    <aside id="task-panel" class="task-panel hidden" aria-hidden="true">
+        <header class="task-panel-header">
+            <div class="task-panel-title-wrap">
+                <span id="task-panel-status" class="task-status"></span>
+                <span id="task-panel-title" class="task-panel-title"></span>
+            </div>
+            <button id="task-panel-close" class="task-panel-close" title="Close" aria-label="Close">&times;</button>
+        </header>
+        <div id="task-panel-body" class="task-panel-body"></div>
+    </aside>
+    <div id="task-panel-backdrop" class="task-panel-backdrop hidden"></div>
+
+    <!-- Generic confirm/alert dialog -->
+    <div id="app-dialog" class="app-dialog hidden" role="dialog" aria-modal="true">
+        <div class="app-dialog-card">
+            <h3 id="app-dialog-title" class="app-dialog-title"></h3>
+            <p id="app-dialog-body" class="app-dialog-body"></p>
+            <div class="app-dialog-actions">
+                <button id="app-dialog-cancel" class="task-action-btn task-action-secondary" type="button">Cancel</button>
+                <button id="app-dialog-confirm" class="task-action-btn task-action-primary" type="button">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- New-task modal -->
+    <div id="new-task-modal" class="new-task-modal hidden">
+        <div class="new-task-card">
+            <header class="new-task-header">
+                <h3>New Task</h3>
+                <button id="new-task-close" class="task-panel-close" title="Close" aria-label="Close">&times;</button>
+            </header>
+            <form id="new-task-form" class="new-task-form">
+                <label class="task-field">
+                    <span>Title</span>
+                    <input id="new-task-title" type="text" required maxlength="200" placeholder="Short name for the task">
+                </label>
+                <label class="task-field">
+                    <span>Goal</span>
+                    <textarea id="new-task-goal" rows="4" required placeholder="What should Lumi accomplish?"></textarea>
+                </label>
+                <label class="task-field">
+                    <span>Start at (optional)</span>
+                    <input id="new-task-start" type="datetime-local">
+                    <span class="task-date-preview" id="new-task-start-preview">Starts immediately</span>
+                </label>
+                <label class="task-field">
+                    <span>Due at (optional)</span>
+                    <input id="new-task-due" type="datetime-local">
+                    <span class="task-date-preview" id="new-task-due-preview">No deadline</span>
+                </label>
+                <div class="new-task-actions">
+                    <button type="button" id="new-task-cancel" class="task-action-btn task-action-secondary">Cancel</button>
+                    <button type="submit" class="task-action-btn task-action-primary">Create Task</button>
+                </div>
+                <div id="new-task-error" class="new-task-error hidden"></div>
+            </form>
+        </div>
+    </div>
 
     <script type="module" src="/static/js/app.js"></script>
 </body>

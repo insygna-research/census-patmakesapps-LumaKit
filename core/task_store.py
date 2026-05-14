@@ -8,11 +8,49 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
+from typing import Callable
 
 from core.paths import get_data_dir
 
 DB_PATH = get_data_dir() / "memory" / "tasks.db"
+
+# Soft cap on per-task history length. Older entries are dropped on append
+# once the list grows past this size — protects long-running tasks from
+# unbounded growth in the SQLite blob.
+HISTORY_SOFT_CAP = 400
+
+# ---------------------------------------------------------------------------
+# Event broadcaster — task_runner mutations and explicit user actions emit
+# events that the web layer subscribes to for live updates.
+# ---------------------------------------------------------------------------
+
+_listeners: list[Callable[[dict], None]] = []
+_listeners_lock = threading.RLock()
+
+
+def subscribe(cb: Callable[[dict], None]) -> None:
+    with _listeners_lock:
+        _listeners.append(cb)
+
+
+def unsubscribe(cb: Callable[[dict], None]) -> None:
+    with _listeners_lock:
+        try:
+            _listeners.remove(cb)
+        except ValueError:
+            pass
+
+
+def _emit(event: dict) -> None:
+    with _listeners_lock:
+        callbacks = list(_listeners)
+    for cb in callbacks:
+        try:
+            cb(event)
+        except Exception:
+            pass
 
 
 def _connect() -> sqlite3.Connection:
@@ -83,6 +121,7 @@ def create_task(
     conn.commit()
     task_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.close()
+    _emit({"type": "task_created", "task_id": task_id})
     return task_id
 
 
@@ -95,20 +134,29 @@ def set_plan(task_id: int, plan: list, next_run_at: str | None = None) -> None:
     )
     conn.commit()
     conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "status": "active"})
 
 
 def append_history(task_id: int, entry: dict) -> None:
-    """Append one entry to the task's history log."""
+    """Append one entry to the task's history log.
+
+    Caps the stored history at HISTORY_SOFT_CAP entries; older entries are
+    dropped to keep the SQLite blob from growing without bound.
+    """
     conn = _connect()
     row = conn.execute("SELECT history FROM tasks WHERE id=?", (task_id,)).fetchone()
     if not row:
         conn.close()
         return
     history = json.loads(row["history"])
-    history.append({**entry, "timestamp": datetime.now().isoformat()})
+    entry_with_ts = {**entry, "timestamp": datetime.now().isoformat()}
+    history.append(entry_with_ts)
+    if len(history) > HISTORY_SOFT_CAP:
+        history = history[-HISTORY_SOFT_CAP:]
     conn.execute("UPDATE tasks SET history=? WHERE id=?", (json.dumps(history), task_id))
     conn.commit()
     conn.close()
+    _emit({"type": "history_appended", "task_id": task_id, "entry": entry_with_ts})
 
 
 def advance_step(task_id: int, next_run_at: str) -> None:
@@ -120,6 +168,7 @@ def advance_step(task_id: int, next_run_at: str) -> None:
     )
     conn.commit()
     conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "field": "current_step"})
 
 
 def update_task(task_id: int, **kwargs) -> None:
@@ -131,6 +180,7 @@ def update_task(task_id: int, **kwargs) -> None:
     conn.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*kwargs.values(), task_id))
     conn.commit()
     conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "fields": list(kwargs.keys())})
 
 
 def complete_task(task_id: int, result: str) -> None:
@@ -141,6 +191,7 @@ def complete_task(task_id: int, result: str) -> None:
     )
     conn.commit()
     conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "status": "done"})
 
 
 def fail_task(task_id: int, reason: str) -> None:
@@ -151,6 +202,94 @@ def fail_task(task_id: int, reason: str) -> None:
     )
     conn.commit()
     conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "status": "failed"})
+
+
+def pause_task(task_id: int) -> bool:
+    """Mark an active task as paused so the runner skips it."""
+    conn = _connect()
+    cursor = conn.execute(
+        "UPDATE tasks SET status='paused' WHERE id=? AND status IN ('planning', 'active')",
+        (task_id,),
+    )
+    conn.commit()
+    conn.close()
+    if cursor.rowcount > 0:
+        _emit({"type": "task_updated", "task_id": task_id, "status": "paused"})
+        return True
+    return False
+
+
+def resume_task(task_id: int) -> bool:
+    """Resume a paused or blocked task. next_run_at is set to now so the runner
+    picks it up on the next tick. Status reverts to 'planning' if no plan
+    exists yet, otherwise 'active'.
+    """
+    conn = _connect()
+    row = conn.execute(
+        "SELECT plan, status FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    if row["status"] not in ("paused", "blocked"):
+        conn.close()
+        return False
+    plan = json.loads(row["plan"] or "[]")
+    new_status = "active" if plan else "planning"
+    conn.execute(
+        "UPDATE tasks SET status=?, next_run_at=? WHERE id=?",
+        (new_status, datetime.now().isoformat(), task_id),
+    )
+    conn.commit()
+    conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "status": new_status})
+    return True
+
+
+def restart_task(task_id: int) -> bool:
+    """Restart a cancelled or failed task. Resets plan/current_step/result and
+    flips status back to 'planning' so the runner regenerates a plan on the
+    next tick. History is preserved as an audit trail.
+    """
+    conn = _connect()
+    row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    if row["status"] not in ("cancelled", "failed", "done"):
+        conn.close()
+        return False
+    conn.execute(
+        """UPDATE tasks
+           SET status='planning', plan='[]', current_step=0,
+               result=NULL, next_run_at=?
+           WHERE id=?""",
+        (datetime.now().isoformat(), task_id),
+    )
+    conn.commit()
+    conn.close()
+    _emit({"type": "task_updated", "task_id": task_id, "status": "planning"})
+    # Audit trail so users see this attempt didn't just appear from nowhere.
+    append_history(task_id, {"type": "restarted"})
+    return True
+
+
+def cancel_task(task_id: int) -> bool:
+    """Mark a task as cancelled. Stops any further runner work but keeps the
+    record so the user can still view its history.
+    """
+    conn = _connect()
+    cursor = conn.execute(
+        "UPDATE tasks SET status='cancelled' WHERE id=? AND status NOT IN ('done', 'failed', 'cancelled')",
+        (task_id,),
+    )
+    conn.commit()
+    conn.close()
+    if cursor.rowcount > 0:
+        _emit({"type": "task_updated", "task_id": task_id, "status": "cancelled"})
+        return True
+    return False
 
 
 def delete_task(task_id: int) -> bool:
@@ -159,7 +298,10 @@ def delete_task(task_id: int) -> bool:
     cursor = conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
-    return cursor.rowcount > 0
+    if cursor.rowcount > 0:
+        _emit({"type": "task_deleted", "task_id": task_id})
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

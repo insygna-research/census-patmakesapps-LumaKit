@@ -1017,12 +1017,20 @@ async function loadChatList() {
             del.innerHTML = '&times;';
             del.onclick = async (e) => {
                 e.stopPropagation();
-                if (!confirm(`Delete "${chat.title || 'Untitled'}"? This can't be undone.`)) return;
+                const ok = await showConfirmDialog({
+                    title: `Delete "${chat.title || 'Untitled'}"?`,
+                    body: "This chat and its history will be removed. This can't be undone.",
+                    confirmLabel: 'Delete',
+                    danger: true,
+                });
+                if (!ok) return;
                 try {
                     await fetch(`/api/chats/${encodeURIComponent(chat.id)}`, { method: 'DELETE' });
                     if (chat.id === currentChatId) {
-                        window.location.reload();
-                        return;
+                        // Was the active chat — spin up a fresh one over the existing
+                        // WebSocket instead of reloading the page (which left the
+                        // sidebar empty for ~1s while everything re-mounted).
+                        ws.send({ type: 'new_chat' });
                     }
                     loadChatList();
                 } catch (err) {
@@ -1040,31 +1048,522 @@ async function loadChatList() {
     }
 }
 
+// --- App dialog (replaces window.confirm / window.alert) ---
+const $appDialog = document.getElementById('app-dialog');
+const $appDialogTitle = document.getElementById('app-dialog-title');
+const $appDialogBody = document.getElementById('app-dialog-body');
+const $appDialogCancel = document.getElementById('app-dialog-cancel');
+const $appDialogConfirm = document.getElementById('app-dialog-confirm');
+
+let _appDialogResolver = null;
+
+function _closeAppDialog(result) {
+    if (!$appDialog) return;
+    $appDialog.classList.add('hidden');
+    const r = _appDialogResolver;
+    _appDialogResolver = null;
+    if (r) r(result);
+}
+
+function showConfirmDialog({ title, body, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+    return new Promise((resolve) => {
+        if (!$appDialog) { resolve(window.confirm(`${title}\n\n${body || ''}`)); return; }
+        $appDialogTitle.textContent = title || '';
+        $appDialogBody.textContent = body || '';
+        $appDialogConfirm.textContent = confirmLabel;
+        $appDialogCancel.textContent = cancelLabel;
+        $appDialogConfirm.classList.toggle('task-action-danger', !!danger);
+        $appDialogConfirm.classList.toggle('task-action-primary', !danger);
+        $appDialogCancel.hidden = false;
+        _appDialogResolver = resolve;
+        $appDialog.classList.remove('hidden');
+        setTimeout(() => $appDialogConfirm.focus(), 0);
+    });
+}
+
+function showAlertDialog({ title, body, confirmLabel = 'OK' } = {}) {
+    return new Promise((resolve) => {
+        if (!$appDialog) { window.alert(`${title}\n\n${body || ''}`); resolve(); return; }
+        $appDialogTitle.textContent = title || '';
+        $appDialogBody.textContent = body || '';
+        $appDialogConfirm.textContent = confirmLabel;
+        $appDialogConfirm.classList.remove('task-action-danger');
+        $appDialogConfirm.classList.add('task-action-primary');
+        $appDialogCancel.hidden = true;
+        _appDialogResolver = () => resolve();
+        $appDialog.classList.remove('hidden');
+        setTimeout(() => $appDialogConfirm.focus(), 0);
+    });
+}
+
+if ($appDialogConfirm) $appDialogConfirm.onclick = () => _closeAppDialog(true);
+if ($appDialogCancel) $appDialogCancel.onclick = () => _closeAppDialog(false);
+if ($appDialog) {
+    $appDialog.addEventListener('click', (e) => {
+        if (e.target === $appDialog) _closeAppDialog(false);
+    });
+    document.addEventListener('keydown', (e) => {
+        if ($appDialog.classList.contains('hidden')) return;
+        if (e.key === 'Escape') { e.preventDefault(); _closeAppDialog(false); }
+        if (e.key === 'Enter') { e.preventDefault(); _closeAppDialog(true); }
+    });
+}
+
 // --- Tasks ---
+let taskListWs = null;
+let taskListCache = [];
+let taskDetailWs = null;
+let taskDetailId = null;
+let taskDetailCache = null;
+const TERMINAL_STATUSES = new Set(['done', 'failed', 'cancelled']);
+
+function formatTaskTimestamp(ts) {
+    if (!ts) return '';
+    // Backend serializes datetime.isoformat(); display the local-ish prefix.
+    return ts.slice(0, 16).replace('T', ' ');
+}
+
+function formatFriendlyDate(value) {
+    if (!value) return '';
+    // Accept either an ISO timestamp or a datetime-local "YYYY-MM-DDTHH:MM" value.
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return '';
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    const isTomorrow = d.toDateString() === tomorrow.toDateString();
+    const timeStr = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    if (sameDay) return `Today at ${timeStr}`;
+    if (isTomorrow) return `Tomorrow at ${timeStr}`;
+    const dateStr = d.toLocaleDateString(undefined, {
+        weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+    });
+    return `${dateStr} • ${timeStr}`;
+}
+
+function renderTaskListItems() {
+    if (!taskListCache || taskListCache.length === 0) {
+        $taskList.innerHTML = '<p class="task-empty-note">No tasks yet. Use “+ New Task” to create one.</p>';
+        return;
+    }
+    $taskList.innerHTML = '';
+    for (const task of taskListCache) {
+        const item = document.createElement('div');
+        item.className = 'task-item';
+        item.dataset.taskId = String(task.id);
+        item.innerHTML = `
+            <div class="task-title">${escapeHtml(task.title || 'Untitled')}</div>
+            <div class="task-meta">
+                <span class="task-status ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span>
+                <span>${escapeHtml(formatTaskTimestamp(task.created_at))}</span>
+            </div>
+        `;
+        item.onclick = () => openTaskDetail(task.id);
+        $taskList.appendChild(item);
+    }
+}
+
 async function loadTasks() {
     try {
         const res = await fetch('/api/tasks');
-        const tasks = await res.json();
-        if (tasks.length === 0) {
-            $taskList.innerHTML = '<p style="color: var(--text-muted)">No tasks yet.</p>';
-            return;
-        }
-        $taskList.innerHTML = '';
-        for (const task of tasks) {
-            const item = document.createElement('div');
-            item.className = 'task-item';
-            item.innerHTML = `
-                <div class="task-title">${task.title}</div>
-                <div class="task-meta">
-                    <span class="task-status ${task.status}">${task.status}</span>
-                    <span>${task.created_at?.slice(0, 16) || ''}</span>
-                </div>
-            `;
-            $taskList.appendChild(item);
-        }
+        taskListCache = await res.json();
+        renderTaskListItems();
+        connectTaskListWs();
     } catch (e) {
         $taskList.innerHTML = '<p style="color: var(--error)">Failed to load tasks.</p>';
     }
+}
+
+function connectTaskListWs() {
+    if (taskListWs && taskListWs.readyState <= 1) return;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    try {
+        taskListWs = new WebSocket(`${proto}://${location.host}/ws/tasks`);
+    } catch (_) {
+        return;
+    }
+    taskListWs.onmessage = async (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+        if (msg.type === 'snapshot' && Array.isArray(msg.tasks)) {
+            taskListCache = msg.tasks;
+            renderTaskListItems();
+            return;
+        }
+        // Any task_* event prompts a quick refresh of the list cache; cheap
+        // because it's a single SQLite query and keeps statuses live.
+        if (msg.type === 'task_created' || msg.type === 'task_updated' || msg.type === 'task_deleted') {
+            try {
+                const res = await fetch('/api/tasks');
+                taskListCache = await res.json();
+                renderTaskListItems();
+            } catch (_) { /* ignore — next event will retry */ }
+        }
+    };
+    taskListWs.onclose = () => {
+        taskListWs = null;
+        // Reconnect only if the task view is still active; avoids burning sockets.
+        if (currentView === 'task') {
+            setTimeout(connectTaskListWs, 2000);
+        }
+    };
+}
+
+// --- Task detail panel ---
+const $taskPanel = document.getElementById('task-panel');
+const $taskPanelBackdrop = document.getElementById('task-panel-backdrop');
+const $taskPanelBody = document.getElementById('task-panel-body');
+const $taskPanelTitle = document.getElementById('task-panel-title');
+const $taskPanelStatus = document.getElementById('task-panel-status');
+const $taskPanelClose = document.getElementById('task-panel-close');
+
+async function openTaskDetail(taskId) {
+    taskDetailId = taskId;
+    $taskPanel.classList.remove('hidden');
+    $taskPanel.setAttribute('aria-hidden', 'false');
+    $taskPanelBackdrop.classList.remove('hidden');
+    $taskPanelBody.innerHTML = '<p class="task-empty-note">Loading…</p>';
+    $taskPanelTitle.textContent = '';
+    $taskPanelStatus.textContent = '';
+    $taskPanelStatus.className = 'task-status';
+
+    try {
+        const res = await fetch(`/api/tasks/${taskId}`);
+        if (!res.ok) throw new Error('not found');
+        taskDetailCache = await res.json();
+        renderTaskDetail(taskDetailCache);
+        connectTaskDetailWs(taskId);
+    } catch (e) {
+        $taskPanelBody.innerHTML = `<p style="color: var(--error)">Could not load task: ${escapeHtml(String(e))}</p>`;
+    }
+}
+
+function closeTaskDetail() {
+    $taskPanel.classList.add('hidden');
+    $taskPanel.setAttribute('aria-hidden', 'true');
+    $taskPanelBackdrop.classList.add('hidden');
+    taskDetailId = null;
+    taskDetailCache = null;
+    if (taskDetailWs) {
+        try { taskDetailWs.close(); } catch (_) {}
+        taskDetailWs = null;
+    }
+}
+
+function renderTaskDetail(task) {
+    $taskPanelTitle.textContent = task.title || 'Untitled';
+    $taskPanelStatus.textContent = task.status;
+    $taskPanelStatus.className = `task-status ${task.status}`;
+
+    const plan = Array.isArray(task.plan) ? task.plan : [];
+    const history = Array.isArray(task.history) ? task.history : [];
+    const isTerminal = TERMINAL_STATUSES.has(task.status);
+    const isPaused = task.status === 'paused';
+    const isBlocked = task.status === 'blocked';
+
+    const actionButtons = [];
+    if (!isTerminal) {
+        if (isPaused || isBlocked) {
+            actionButtons.push('<button class="task-action-btn task-action-primary" data-action="resume">Resume</button>');
+        } else {
+            actionButtons.push('<button class="task-action-btn" data-action="pause">Pause</button>');
+        }
+        // Labelled "Stop Task" so it isn't mistaken for "close this panel".
+        actionButtons.push('<button class="task-action-btn task-action-secondary" data-action="cancel">Stop Task</button>');
+    } else if (task.status === 'cancelled' || task.status === 'failed' || task.status === 'done') {
+        actionButtons.push('<button class="task-action-btn task-action-primary" data-action="restart">Restart</button>');
+    }
+    actionButtons.push('<button class="task-action-btn task-action-danger" data-action="delete">Delete</button>');
+
+    const planHtml = plan.length
+        ? `<ol class="task-plan-list">${plan.map((step, i) => {
+            const isCurrent = i === task.current_step && !isTerminal;
+            const isDone = i < task.current_step;
+            const cls = isCurrent ? 'current' : isDone ? 'done' : '';
+            return `<li class="task-plan-step ${cls}">
+                <span class="task-plan-step-index">${i + 1}.</span>
+                <span>${escapeHtml(step.description || '')}</span>
+            </li>`;
+        }).join('')}</ol>`
+        : '<p class="task-empty-note">No plan yet — Lumi will draft one shortly.</p>';
+
+    const historyHtml = history.length
+        ? history.slice().reverse().map(entry => renderHistoryEntry(entry)).join('')
+        : '<p class="task-empty-note">No activity recorded yet.</p>';
+
+    const resultHtml = task.result
+        ? `<div class="task-result">${escapeHtml(task.result)}</div>`
+        : '';
+
+    const toDtLocal = (iso) => {
+        if (!iso) return '';
+        // datetime-local needs YYYY-MM-DDTHH:MM (no seconds, no zone)
+        return iso.slice(0, 16);
+    };
+
+    $taskPanelBody.innerHTML = `
+        <div class="task-actions-row">${actionButtons.join('')}</div>
+
+        <section class="task-panel-section">
+            <h4>Details</h4>
+            <label class="task-field">
+                <span>Title</span>
+                <input type="text" data-edit="title" value="${escapeHtml(task.title || '')}" ${isTerminal ? 'disabled' : ''}>
+            </label>
+            <label class="task-field">
+                <span>Goal</span>
+                <textarea rows="3" data-edit="goal" ${isTerminal ? 'disabled' : ''}>${escapeHtml(task.goal || '')}</textarea>
+            </label>
+            <div class="task-edit-row">
+                <label class="task-field" style="flex:1">
+                    <span>Due at</span>
+                    <input type="datetime-local" data-edit="due_at" data-preview="due_at-preview" value="${escapeHtml(toDtLocal(task.due_at))}" ${isTerminal ? 'disabled' : ''}>
+                    <span class="task-date-preview" id="due_at-preview">${escapeHtml(formatFriendlyDate(task.due_at) || 'No deadline')}</span>
+                </label>
+                <label class="task-field" style="flex:1">
+                    <span>Next run</span>
+                    <input type="datetime-local" data-edit="next_run_at" data-preview="next_run_at-preview" value="${escapeHtml(toDtLocal(task.next_run_at))}" ${isTerminal ? 'disabled' : ''}>
+                    <span class="task-date-preview" id="next_run_at-preview">${escapeHtml(formatFriendlyDate(task.next_run_at) || 'Not scheduled')}</span>
+                </label>
+            </div>
+            ${isTerminal ? '' : '<button class="task-action-btn task-action-primary" data-action="save">Save changes</button>'}
+        </section>
+
+        ${resultHtml ? `<section class="task-panel-section"><h4>Result</h4>${resultHtml}</section>` : ''}
+
+        <section class="task-panel-section">
+            <h4>Plan${plan.length ? ` (step ${Math.min(task.current_step + 1, plan.length)}/${plan.length})` : ''}</h4>
+            ${planHtml}
+        </section>
+
+        <section class="task-panel-section">
+            <h4>Activity</h4>
+            <div class="task-activity" id="task-activity">${historyHtml}</div>
+        </section>
+
+        <section class="task-panel-section">
+            <h4>Workspace</h4>
+            <p class="task-empty-note">${escapeHtml(task.workspace_path || 'not set')}</p>
+        </section>
+    `;
+
+    // Wire action buttons
+    $taskPanelBody.querySelectorAll('[data-action]').forEach(btn => {
+        btn.onclick = () => handleTaskAction(task.id, btn.dataset.action);
+    });
+
+    // Live human-readable previews for the datetime inputs.
+    $taskPanelBody.querySelectorAll('[data-preview]').forEach(input => {
+        const previewEl = document.getElementById(input.dataset.preview);
+        if (!previewEl) return;
+        input.addEventListener('input', () => {
+            const friendly = formatFriendlyDate(input.value);
+            const isDue = input.dataset.edit === 'due_at';
+            previewEl.textContent = friendly || (isDue ? 'No deadline' : 'Not scheduled');
+        });
+    });
+}
+
+function renderHistoryEntry(entry) {
+    const type = entry.type || 'event';
+    const ts = formatTaskTimestamp(entry.timestamp);
+    let text = '';
+    if (type === 'plan_generated') {
+        const steps = Array.isArray(entry.steps) ? entry.steps : [];
+        text = `Plan generated with ${entry.step_count || steps.length} step${(entry.step_count || steps.length) === 1 ? '' : 's'}.`;
+    } else if (type === 'step_result') {
+        text = `Step ${(entry.step_index ?? 0) + 1} [${entry.verdict || '?'}]: ${entry.summary || ''}`;
+    } else if (type === 'planning_retry') {
+        text = `Planning retry #${entry.attempt} — next at ${formatTaskTimestamp(entry.next_run_at)}. ${entry.error || ''}`;
+    } else if (type === 'workspace_fallback') {
+        text = `Workspace missing (${entry.recorded}); using fallback ${entry.fallback}.`;
+    } else {
+        text = entry.summary || entry.description || JSON.stringify(entry);
+    }
+    return `<div class="task-activity-entry">
+        <div class="task-activity-meta"><span>${escapeHtml(type)}</span><span>${escapeHtml(ts)}</span></div>
+        <div class="task-activity-text">${escapeHtml(text)}</div>
+    </div>`;
+}
+
+async function handleTaskAction(taskId, action) {
+    try {
+        // Destructive actions need a confirm — closing the panel by accident
+        // shouldn't kill a running task.
+        const title = taskDetailCache?.title || 'this task';
+        if (action === 'cancel') {
+            const ok = await showConfirmDialog({
+                title: `Stop "${title}"?`,
+                body: 'The runner will halt and the task will move to the cancelled state. You can restart it later.',
+                confirmLabel: 'Stop Task',
+                danger: true,
+            });
+            if (!ok) return;
+        }
+        if (action === 'delete') {
+            const ok = await showConfirmDialog({
+                title: `Delete "${title}"?`,
+                body: 'This removes all of its history permanently and cannot be undone.',
+                confirmLabel: 'Delete',
+                danger: true,
+            });
+            if (!ok) return;
+        }
+
+        if (action === 'pause' || action === 'resume' || action === 'cancel' || action === 'restart') {
+            const res = await fetch(`/api/tasks/${taskId}/${action}`, { method: 'POST' });
+            if (!res.ok) throw new Error((await res.json()).error || `Failed to ${action}`);
+            taskDetailCache = await res.json();
+            renderTaskDetail(taskDetailCache);
+        } else if (action === 'delete') {
+            const res = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Delete failed');
+            closeTaskDetail();
+            loadTasks();
+        } else if (action === 'save') {
+            const payload = {};
+            $taskPanelBody.querySelectorAll('[data-edit]').forEach(el => {
+                const key = el.dataset.edit;
+                const val = el.value;
+                // Send empty datetime fields as null so the server can clear them.
+                if (key === 'due_at' || key === 'next_run_at') {
+                    payload[key] = val ? val : null;
+                } else {
+                    payload[key] = val;
+                }
+            });
+            const res = await fetch(`/api/tasks/${taskId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error((await res.json()).error || 'Save failed');
+            taskDetailCache = await res.json();
+            renderTaskDetail(taskDetailCache);
+        }
+    } catch (e) {
+        showAlertDialog({
+            title: 'Action failed',
+            body: e.message || String(e),
+        });
+    }
+}
+
+function connectTaskDetailWs(taskId) {
+    if (taskDetailWs) {
+        try { taskDetailWs.close(); } catch (_) {}
+        taskDetailWs = null;
+    }
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    try {
+        taskDetailWs = new WebSocket(`${proto}://${location.host}/ws/tasks?task_id=${taskId}`);
+    } catch (_) { return; }
+    taskDetailWs.onmessage = async (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+        if (taskDetailId !== taskId) return; // panel was closed/switched
+
+        if (msg.type === 'snapshot' && msg.task) {
+            taskDetailCache = msg.task;
+            renderTaskDetail(taskDetailCache);
+            return;
+        }
+        if (msg.type === 'history_appended' && taskDetailCache) {
+            taskDetailCache.history = taskDetailCache.history || [];
+            taskDetailCache.history.push(msg.entry);
+            const activityEl = document.getElementById('task-activity');
+            if (activityEl) {
+                activityEl.insertAdjacentHTML('afterbegin', renderHistoryEntry(msg.entry));
+            }
+            return;
+        }
+        if (msg.type === 'task_updated' || msg.type === 'task_created') {
+            try {
+                const res = await fetch(`/api/tasks/${taskId}`);
+                if (res.ok) {
+                    taskDetailCache = await res.json();
+                    renderTaskDetail(taskDetailCache);
+                }
+            } catch (_) {}
+        }
+        if (msg.type === 'task_deleted') {
+            closeTaskDetail();
+            loadTasks();
+        }
+    };
+    taskDetailWs.onclose = () => {
+        // If the panel is still open, retry once after a beat.
+        if (taskDetailId === taskId) {
+            setTimeout(() => {
+                if (taskDetailId === taskId) connectTaskDetailWs(taskId);
+            }, 2000);
+        }
+    };
+}
+
+if ($taskPanelClose) $taskPanelClose.onclick = closeTaskDetail;
+if ($taskPanelBackdrop) $taskPanelBackdrop.onclick = closeTaskDetail;
+
+// --- New task modal ---
+const $newTaskBtn = document.getElementById('new-task-btn');
+const $newTaskModal = document.getElementById('new-task-modal');
+const $newTaskClose = document.getElementById('new-task-close');
+const $newTaskCancel = document.getElementById('new-task-cancel');
+const $newTaskForm = document.getElementById('new-task-form');
+const $newTaskError = document.getElementById('new-task-error');
+
+function openNewTaskModal() {
+    $newTaskForm.reset();
+    $newTaskError.classList.add('hidden');
+    $newTaskModal.classList.remove('hidden');
+}
+function closeNewTaskModal() {
+    $newTaskModal.classList.add('hidden');
+}
+if ($newTaskBtn) $newTaskBtn.onclick = openNewTaskModal;
+if ($newTaskClose) $newTaskClose.onclick = closeNewTaskModal;
+if ($newTaskCancel) $newTaskCancel.onclick = closeNewTaskModal;
+
+// Live previews on the new-task modal date inputs
+['start', 'due'].forEach((key) => {
+    const input = document.getElementById(`new-task-${key}`);
+    const preview = document.getElementById(`new-task-${key}-preview`);
+    if (!input || !preview) return;
+    const fallback = key === 'start' ? 'Starts immediately' : 'No deadline';
+    input.addEventListener('input', () => {
+        preview.textContent = formatFriendlyDate(input.value) || fallback;
+    });
+});
+if ($newTaskForm) {
+    $newTaskForm.onsubmit = async (e) => {
+        e.preventDefault();
+        $newTaskError.classList.add('hidden');
+        const payload = {
+            title: document.getElementById('new-task-title').value.trim(),
+            goal: document.getElementById('new-task-goal').value.trim(),
+            start_at: document.getElementById('new-task-start').value || null,
+            due_at: document.getElementById('new-task-due').value || null,
+        };
+        try {
+            const res = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || `Server returned ${res.status}`);
+            }
+            const created = await res.json();
+            closeNewTaskModal();
+            await loadTasks();
+            if (created && created.id) openTaskDetail(created.id);
+        } catch (err) {
+            $newTaskError.textContent = err.message || 'Could not create task.';
+            $newTaskError.classList.remove('hidden');
+        }
+    };
 }
 
 // --- Settings ---

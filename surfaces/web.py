@@ -284,6 +284,91 @@ async def api_get_task(task_id: int):
     return task
 
 
+_TASK_PATCHABLE = {"title", "goal", "due_at", "next_run_at"}
+
+
+@app.post("/api/tasks")
+async def api_create_task(payload: dict):
+    title = str(payload.get("title", "") or "").strip()
+    goal = str(payload.get("goal", "") or "").strip()
+    if not title or not goal:
+        return JSONResponse({"error": "title and goal are required"}, status_code=400)
+    start_at = payload.get("start_at") or None
+    due_at = payload.get("due_at") or None
+    workspace_raw = payload.get("workspace_path") or None
+    workspace_path = None
+    if workspace_raw:
+        try:
+            workspace_path = str(_resolve_workspace_path(workspace_raw))
+        except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    else:
+        workspace_path = str(_default_workspace())
+    task_id = task_store.create_task(
+        title=title,
+        goal=goal,
+        owner_chat_id=WEB_USER_ID,
+        due_at=due_at,
+        start_at=start_at,
+        workspace_path=workspace_path,
+    )
+    return task_store.get_task(task_id)
+
+
+@app.patch("/api/tasks/{task_id}")
+async def api_update_task(task_id: int, payload: dict):
+    if not task_store.get_task(task_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    fields = {k: v for k, v in payload.items() if k in _TASK_PATCHABLE}
+    if not fields:
+        return JSONResponse({"error": "no editable fields provided"}, status_code=400)
+    task_store.update_task(task_id, **fields)
+    return task_store.get_task(task_id)
+
+
+@app.delete("/api/tasks/{task_id}")
+async def api_delete_task(task_id: int):
+    deleted = task_store.delete_task(task_id)
+    return {"deleted": deleted}
+
+
+@app.post("/api/tasks/{task_id}/pause")
+async def api_pause_task(task_id: int):
+    if not task_store.pause_task(task_id):
+        return JSONResponse(
+            {"error": "task is not in a pausable state"}, status_code=400
+        )
+    return task_store.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/resume")
+async def api_resume_task(task_id: int):
+    if not task_store.resume_task(task_id):
+        return JSONResponse(
+            {"error": "task is not paused or blocked"}, status_code=400
+        )
+    return task_store.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def api_cancel_task(task_id: int):
+    if not task_store.cancel_task(task_id):
+        return JSONResponse(
+            {"error": "task is already in a terminal state"}, status_code=400
+        )
+    return task_store.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/restart")
+async def api_restart_task(task_id: int):
+    if not task_store.restart_task(task_id):
+        return JSONResponse(
+            {"error": "task can only be restarted from cancelled, failed, or done"},
+            status_code=400,
+        )
+    return task_store.get_task(task_id)
+
+
 @app.get("/api/memories")
 async def api_list_memories():
     return memory_store.get_recent(limit=50)
@@ -338,6 +423,35 @@ _ws_confirm_results: dict[int, bool] = {}
 _ws_tool_ctx: dict[int, dict] = {}
 _web_clients_lock = threading.RLock()
 _web_clients: dict[str, set] = {}
+# Task websocket subscribers. Each entry is (send_callable, task_id_filter_or_None).
+_task_ws_lock = threading.RLock()
+_task_ws_clients: list[tuple] = []
+_task_ws_subscribed = False
+
+
+def _broadcast_task_event(event: dict) -> None:
+    """Fan a task_store event out to every connected task websocket. Runs on
+    the task_runner thread, so it must hand back to the event loop via the
+    thread-safe sender registered with each client.
+    """
+    task_id = event.get("task_id")
+    with _task_ws_lock:
+        clients = list(_task_ws_clients)
+    for send_fn, filter_id in clients:
+        if filter_id is not None and filter_id != task_id:
+            continue
+        try:
+            send_fn(event)
+        except Exception:
+            pass
+
+
+def _ensure_task_ws_subscribed() -> None:
+    global _task_ws_subscribed
+    if _task_ws_subscribed:
+        return
+    task_store.subscribe(_broadcast_task_event)
+    _task_ws_subscribed = True
 _EMAIL_AFFIRM = {"yes", "y", "yep", "yeah", "send", "send it", "do it", "ok", "okay", "sure"}
 _EMAIL_DENY = {"no", "n", "nah", "skip", "cancel", "nope", "don't", "dont"}
 
@@ -1116,6 +1230,63 @@ async def websocket_chat(ws: WebSocket):
         _ws_confirm_events.pop(ws_id, None)
         _ws_confirm_results.pop(ws_id, None)
         _ws_tool_ctx.pop(ws_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Task websocket — streams live activity and status changes to the web UI.
+# Optional ?task_id query param scopes the stream to a single task.
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/tasks")
+async def websocket_tasks(ws: WebSocket):
+    await ws.accept()
+    _ensure_task_ws_subscribed()
+    loop = asyncio.get_event_loop()
+    ws_closed = {"v": False}
+
+    filter_id: int | None = None
+    raw_filter = ws.query_params.get("task_id")
+    if raw_filter:
+        try:
+            filter_id = int(raw_filter)
+        except ValueError:
+            filter_id = None
+
+    def send_event(event: dict) -> None:
+        if ws_closed["v"]:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(ws.send_json(event), loop)
+        except Exception:
+            pass
+
+    entry = (send_event, filter_id)
+    with _task_ws_lock:
+        _task_ws_clients.append(entry)
+
+    # Send an initial snapshot so the client can render before any event fires.
+    if filter_id is not None:
+        snapshot = task_store.get_task(filter_id)
+        if snapshot:
+            await ws.send_json({"type": "snapshot", "task": snapshot})
+    else:
+        await ws.send_json({"type": "snapshot", "tasks": task_store.get_all_tasks(limit=50)})
+
+    try:
+        # Keep the socket alive; ignore any inbound messages.
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        ws_closed["v"] = True
+        with _task_ws_lock:
+            try:
+                _task_ws_clients.remove(entry)
+            except ValueError:
+                pass
 
 
 # ---------------------------------------------------------------------------

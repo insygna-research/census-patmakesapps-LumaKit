@@ -135,10 +135,14 @@ class TaskRunner:
 
     # How many times to retry a failed step before moving on
     MAX_STEP_RETRIES = 2
-    # How many times to retry a failed planning pass
+    # How many times to retry a failed planning pass within a single tick
     MAX_PLAN_RETRIES = 2
+    # How many planning ticks to retry with backoff before giving up entirely
+    MAX_PLAN_TICK_ATTEMPTS = 4
+    # Minutes between planning retries, indexed by attempt number
+    PLAN_BACKOFF_MINUTES = (2, 10, 30, 120)
     # Hard cap on LLM rounds per step execution
-    MAX_TOOL_ROUNDS = 8
+    MAX_TOOL_ROUNDS = 14
     # Seconds per LLM call in a step
     STEP_LLM_DEADLINE = 180
     # Token budget for structured LLM calls (planning, evaluation, report)
@@ -172,8 +176,19 @@ class TaskRunner:
 
     def start(self) -> None:
         self._stop.clear()
+        # Catch-up pass: surface stale schedules so users see progress on tasks
+        # that were due while the service was down.
+        try:
+            self._log_catch_up()
+        except Exception as e:
+            print(f"[task-runner] catch-up scan failed: {e}")
         self._thread = threading.Thread(target=self._loop, daemon=True, name="task-runner")
         self._thread.start()
+
+    def _log_catch_up(self) -> None:
+        due = task_store.get_due_tasks()
+        if due:
+            print(f"[task-runner] catch-up: {len(due)} task(s) due at startup; will process on first tick")
 
     def stop(self) -> None:
         self._stop.set()
@@ -197,20 +212,14 @@ class TaskRunner:
         # Check overdue tasks first (past due_at, not yet finalized)
         for task in task_store.get_overdue_tasks():
             with self._lock:
-                workspace = self._resolve_task_workspace(task)
-                if workspace is None:
-                    self._block_missing_workspace(task)
-                    continue
+                workspace = self._resolve_task_workspace_or_fallback(task)
                 with workspace_context(workspace):
                     self._finalize_overdue(task)
 
         # Then process tasks whose next_run_at has passed
         for task in task_store.get_due_tasks():
             with self._lock:
-                workspace = self._resolve_task_workspace(task)
-                if workspace is None:
-                    self._block_missing_workspace(task)
-                    continue
+                workspace = self._resolve_task_workspace_or_fallback(task)
                 with workspace_context(workspace):
                     if task["status"] == "planning":
                         self._run_planning(task)
@@ -281,12 +290,35 @@ class TaskRunner:
             print(f"[task-runner] task {task_id} plan ready ({len(plan)} steps)")
 
         except Exception as e:
-            print(f"[task-runner] planning failed for task {task_id}: {e}")
-            task_store.fail_task(task_id, f"Planning failed: {e}")
-            self._notify(
-                f"Task failed during planning: {task['title']}\n\nError: {e}",
-                task.get("owner_chat_id"),
+            # Soft retry with backoff across ticks so transient LLM/Ollama
+            # outages don't kill an otherwise-valid task. The attempt counter
+            # lives in constraints so it survives across runner restarts.
+            constraints = dict(task.get("constraints") or {})
+            attempt = int(constraints.get("plan_tick_attempts", 0)) + 1
+            constraints["plan_tick_attempts"] = attempt
+            print(f"[task-runner] planning attempt {attempt} failed for task {task_id}: {e}")
+
+            if attempt >= self.MAX_PLAN_TICK_ATTEMPTS:
+                task_store.fail_task(task_id, f"Planning failed after {attempt} attempts: {e}")
+                self._notify(
+                    f"Task failed during planning: {task['title']}\n\nError: {e}",
+                    task.get("owner_chat_id"),
+                )
+                return
+
+            mins = self.PLAN_BACKOFF_MINUTES[min(attempt - 1, len(self.PLAN_BACKOFF_MINUTES) - 1)]
+            next_run = (datetime.now() + timedelta(minutes=mins)).isoformat()
+            task_store.update_task(
+                task_id,
+                constraints=json.dumps(constraints),
+                next_run_at=next_run,
             )
+            task_store.append_history(task_id, {
+                "type": "planning_retry",
+                "attempt": attempt,
+                "error": str(e)[:300],
+                "next_run_at": next_run,
+            })
 
     # ------------------------------------------------------------------
     # Step execution
@@ -536,8 +568,11 @@ class TaskRunner:
             raw = self._llm_call(prompt, owner_chat_id=owner_chat_id)
             return self._parse_json(raw)
         except Exception as e:
+            # Default to 'partial' so a flaky evaluation doesn't quietly march
+            # past a broken step. The runner will give the step another pass on
+            # the next check-in instead of advancing as if it had succeeded.
             print(f"[task-runner] evaluation parse error: {e}")
-            return {"verdict": "success", "reason": "eval failed, assuming success", "summary": output[:200]}
+            return {"verdict": "partial", "reason": "eval parse failed, retrying step", "summary": output[:200]}
 
     # ------------------------------------------------------------------
     # Reporting
@@ -672,20 +707,41 @@ class TaskRunner:
             return path
         return None
 
-    def _block_missing_workspace(self, task: dict) -> None:
+    def _resolve_task_workspace_or_fallback(self, task: dict) -> Path:
+        """Return the task's workspace if usable; otherwise fall back to the
+        current repo root and record a one-time warning in history. Previously
+        this blocked the task entirely, which was too strict — a missing
+        workspace often means the user moved a folder, not that the task is
+        unsafe to run.
+        """
+        resolved = self._resolve_task_workspace(task)
+        if resolved is not None:
+            return resolved
+        fallback = get_repo_root()
         task_id = task["id"]
-        workspace = task.get("workspace_path") or "none recorded"
-        reason = (
-            "Task has no valid saved workspace, so it was blocked instead of "
-            f"running in the LumaKit app directory. Recorded workspace: {workspace}"
+        recorded = task.get("workspace_path") or "none recorded"
+        # Only warn once per task to avoid flooding history on every tick.
+        already_warned = any(
+            isinstance(h, dict) and h.get("type") == "workspace_fallback"
+            for h in (task.get("history") or [])
         )
-        print(f"[task-runner] blocking task {task_id}: {reason}")
-        task_store.update_task(task_id, status="blocked", result=reason)
-        self._notify(
-            f"Task blocked: {task['title']}\n\n{reason}\n\n"
-            "Set the desired working directory in the web UI and create the task again.",
-            task.get("owner_chat_id"),
-        )
+        if not already_warned:
+            print(
+                f"[task-runner] task {task_id} workspace missing ({recorded}); "
+                f"falling back to {fallback}"
+            )
+            task_store.append_history(task_id, {
+                "type": "workspace_fallback",
+                "recorded": str(recorded),
+                "fallback": str(fallback),
+            })
+            self._notify(
+                f"Task workspace missing for: {task['title']}\n\n"
+                f"Recorded: {recorded}\n"
+                f"Running in fallback: {fallback}",
+                task.get("owner_chat_id"),
+            )
+        return fallback
 
     def _update_code_index_after_tool(self, name: str, inputs: dict, result: dict) -> None:
         if self._code_index is None or not result.get("success"):
