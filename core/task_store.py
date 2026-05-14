@@ -33,9 +33,13 @@ def _connect() -> sqlite3.Connection:
             created_at  TEXT NOT NULL,
             due_at      TEXT,
             next_run_at TEXT,
+            workspace_path TEXT,
             result      TEXT
         )
     """)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "workspace_path" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
     conn.commit()
     return conn
 
@@ -51,6 +55,7 @@ def create_task(
     owner_chat_id: str | None = None,
     due_at: str | None = None,
     start_at: str | None = None,
+    workspace_path: str | None = None,
 ) -> int:
     """Insert a new task and return its id.
 
@@ -62,8 +67,8 @@ def create_task(
     conn.execute(
         """INSERT INTO tasks
            (title, goal, constraints, status, plan, current_step,
-            history, owner_chat_id, created_at, due_at, next_run_at)
-           VALUES (?, ?, ?, 'planning', '[]', 0, '[]', ?, ?, ?, ?)""",
+            history, owner_chat_id, created_at, due_at, next_run_at, workspace_path)
+           VALUES (?, ?, ?, 'planning', '[]', 0, '[]', ?, ?, ?, ?, ?)""",
         (
             title,
             goal,
@@ -72,6 +77,7 @@ def create_task(
             datetime.now().isoformat(),
             due_at,
             start_at or datetime.now().isoformat(),
+            workspace_path,
         ),
     )
     conn.commit()

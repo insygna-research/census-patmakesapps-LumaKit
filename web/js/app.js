@@ -58,6 +58,7 @@ let activityLastText = '';
 let streamMessageEl = null;
 let streamBubbleEl = null;
 let streamText = '';
+let activeTranscript = [];
 // Pending confirm card awaiting a decision (only one at a time)
 let pendingConfirm = null;
 let currentTurnHadRichReply = false;
@@ -467,6 +468,7 @@ function finishStreamText(text) {
     streamMessageEl = null;
     streamBubbleEl = null;
     streamText = '';
+    return finalText;
 }
 
 function cancelStreamText() {
@@ -934,6 +936,37 @@ function clearMessages() {
     clearAttachedPhoto();
 }
 
+function visibleTranscriptCount(messages) {
+    return (messages || []).filter(m => (
+        m && (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+    )).length;
+}
+
+function rememberVisibleMessage(role, content) {
+    const text = String(content || '').trim();
+    if (!text || !['user', 'assistant'].includes(role)) return;
+    activeTranscript.push({ role, content: text });
+}
+
+function renderChatMessages(messages) {
+    clearMessages();
+
+    const hasMessages = (messages || []).some(m => m.role === 'user' || m.role === 'assistant');
+    if (hasMessages) exitCenteredMode();
+
+    for (const msg of messages || []) {
+        if (msg.role === 'system') continue;
+        if (msg.role === 'tool') {
+            restoreRichToolMessage(msg);
+            continue;
+        }
+        if (msg.role === 'user' || msg.role === 'assistant') {
+            const content = msg.content || '';
+            if (content) addMessage(msg.role, content);
+        }
+    }
+}
+
 // --- Views ---
 function switchView(view) {
     currentView = view;
@@ -968,6 +1001,11 @@ async function loadChatList() {
             title.className = 'chat-item-title';
             title.textContent = chat.title || 'Untitled';
             title.onclick = () => {
+                if (chat.id === currentChatId) {
+                    switchView('chat');
+                    $sidebar.classList.remove('open');
+                    return;
+                }
                 ws.send({ type: 'load_chat', chat_id: chat.id });
                 $sidebar.classList.remove('open');
             };
@@ -1385,14 +1423,22 @@ const ws = new WS({
             if (streamMessageEl && text) finishStreamText(text);
         } else if (text) {
             addMessage('assistant', text);
+            rememberVisibleMessage('assistant', text);
         } else if (runState === 'failed' && runError) {
             addMessage('assistant', `_Run stopped: ${runError}_`);
+            rememberVisibleMessage('assistant', `_Run stopped: ${runError}_`);
         } else if (runState === 'failed') {
             addMessage('assistant', '_Run stopped before a reply was produced._');
+            rememberVisibleMessage('assistant', '_Run stopped before a reply was produced._');
         } else if (!currentTurnHadRichReply) {
             addMessage('assistant', '_Done._');
+            rememberVisibleMessage('assistant', '_Done._');
         }
         currentTurnHadRichReply = false;
+
+        if (Array.isArray(data.messages)) {
+            activeTranscript = data.messages.map(msg => ({ ...msg }));
+        }
 
         if (data.title) {
             $topbarTitle.textContent = data.title;
@@ -1406,7 +1452,9 @@ const ws = new WS({
     },
 
     stream_end(data) {
-        finishStreamText(String(data.text || ''));
+        const text = String(data.text || '');
+        const finalText = finishStreamText(text);
+        rememberVisibleMessage('assistant', finalText);
     },
 
     stream_cancel() {
@@ -1494,25 +1542,26 @@ const ws = new WS({
     },
 
     chat_loaded(data) {
+        const previousChatId = currentChatId;
+        if (data.chat_id === previousChatId && isWorking) {
+            currentChatId = data.chat_id;
+            $topbarTitle.textContent = data.title || 'New Chat';
+            setWorkspace(data.workspace_path, data.workspace_display);
+            loadChatList();
+            switchView('chat');
+            return;
+        }
+        const loadedMessages = data.messages || [];
+        const renderMessages = (
+            data.chat_id === previousChatId
+            && visibleTranscriptCount(activeTranscript) > visibleTranscriptCount(loadedMessages)
+        ) ? activeTranscript : loadedMessages;
+
         currentChatId = data.chat_id;
         $topbarTitle.textContent = data.title || 'New Chat';
         setWorkspace(data.workspace_path, data.workspace_display);
-        clearMessages();
-
-        const hasMessages = (data.messages || []).some(m => m.role === 'user' || m.role === 'assistant');
-        if (hasMessages) exitCenteredMode();
-
-        for (const msg of data.messages || []) {
-            if (msg.role === 'system') continue;
-            if (msg.role === 'tool') {
-                restoreRichToolMessage(msg);
-                continue;
-            }
-            if (msg.role === 'user' || msg.role === 'assistant') {
-                const content = msg.content || '';
-                if (content) addMessage(msg.role, content);
-            }
-        }
+        activeTranscript = renderMessages.map(msg => ({ ...msg }));
+        renderChatMessages(renderMessages);
 
         loadChatList();
         switchView('chat');
@@ -1743,6 +1792,7 @@ function sendMessage() {
         clearActivityCard();
     }
     addUserPhotoMessage(text || 'What do you see in this image?', photo);
+    rememberVisibleMessage('user', text || 'What do you see in this image?');
     ws.send({ type: 'message', text, image: photo });
     $input.value = '';
     $input.style.height = 'auto';

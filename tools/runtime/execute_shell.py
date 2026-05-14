@@ -4,6 +4,7 @@ import signal
 import time
 
 from core.interrupts import OperationInterrupted, raise_if_interrupted
+from core.paths import get_repo_root
 
 
 def get_execute_shell_tool():
@@ -28,8 +29,8 @@ def _execute_shell(inputs):
     timeout = inputs.get('timeout', 600)
 
     try:
-        # Run commands from the project directory, not system root
-        cwd = os.getcwd()
+        # Run commands from the active workspace, not the LumaKit process root.
+        cwd = get_repo_root()
         raise_if_interrupted()
 
         proc = subprocess.Popen(

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from core import task_store
+from core.paths import get_repo_root, workspace_context
 from core.runtime_config import get_effective_config_for_user
 from ollama_client import OllamaClient
 
@@ -49,6 +50,7 @@ Goal: {goal}
 Constraints: {constraints}
 Due date: {due_at}
 Current date/time: {now}
+Workspace: {workspace}
 
 Respond with ONLY a JSON array of step objects. Each step must have these keys:
 - "description": what to do in this step (be specific and actionable)
@@ -72,6 +74,7 @@ _STEP_PROMPT = """You are an autonomous agent executing one step of a larger goa
 Overall goal: {goal}
 Constraints: {constraints}
 Due date: {due_at}
+Workspace: {workspace}
 
 Current step ({step_num} of {total_steps}):
 {step_description}
@@ -161,6 +164,7 @@ class TaskRunner:
         self._ollama: OllamaClient | None = None
         self._registry = None
         self._code_index = None
+        self._registry_root: Path | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -193,15 +197,25 @@ class TaskRunner:
         # Check overdue tasks first (past due_at, not yet finalized)
         for task in task_store.get_overdue_tasks():
             with self._lock:
-                self._finalize_overdue(task)
+                workspace = self._resolve_task_workspace(task)
+                if workspace is None:
+                    self._block_missing_workspace(task)
+                    continue
+                with workspace_context(workspace):
+                    self._finalize_overdue(task)
 
         # Then process tasks whose next_run_at has passed
         for task in task_store.get_due_tasks():
             with self._lock:
-                if task["status"] == "planning":
-                    self._run_planning(task)
-                elif task["status"] == "active":
-                    self._run_step(task)
+                workspace = self._resolve_task_workspace(task)
+                if workspace is None:
+                    self._block_missing_workspace(task)
+                    continue
+                with workspace_context(workspace):
+                    if task["status"] == "planning":
+                        self._run_planning(task)
+                    elif task["status"] == "active":
+                        self._run_step(task)
 
     # ------------------------------------------------------------------
     # Planning pass
@@ -218,6 +232,7 @@ class TaskRunner:
                 constraints=constraints_str,
                 due_at=task.get("due_at") or "no hard deadline",
                 now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                workspace=get_repo_root(),
             )
 
             plan = None
@@ -297,6 +312,7 @@ class TaskRunner:
             goal=task["goal"],
             constraints=constraints_str,
             due_at=task.get("due_at") or "no hard deadline",
+            workspace=get_repo_root(),
             step_num=step_idx + 1,
             total_steps=len(plan),
             step_description=step["description"],
@@ -429,6 +445,10 @@ class TaskRunner:
             "For git status, commit summaries, branch/upstream state, changed-file "
             "reviews, or push readiness, use git_preflight, git_status, show_diff, "
             "and git_log instead of raw git commands through run_command.\n\n"
+            f"Current working directory: {get_repo_root()}\n"
+            "Resolve relative file paths from that directory. Do not write project files "
+            "inside the LumaKit application directory unless it is explicitly the current "
+            "working directory.\n\n"
             f"{identity_block}"
             "When done, write a clear summary of what you found and did."
         )
@@ -630,17 +650,42 @@ class TaskRunner:
         return self._ollama
 
     def _get_registry(self):
-        if self._registry is None:
-            from core.paths import get_repo_root
+        root = get_repo_root().resolve(strict=False)
+        if self._registry is None or self._registry_root != root:
             from tool_registry import ToolRegistry
             from tools.code_intel.code_index import LazyCodeIndex
 
             self._registry = ToolRegistry()
             self._registry.load_tools_from_folder(skip_dirs={"code_intel"})
-            self._code_index = LazyCodeIndex(root=get_repo_root())
+            self._code_index = LazyCodeIndex(root=root)
             for tool in self._code_index.get_tools():
                 self._registry.register(tool, group="code_intel")
+            self._registry_root = root
         return self._registry
+
+    def _resolve_task_workspace(self, task: dict) -> Path | None:
+        workspace = task.get("workspace_path")
+        if not workspace:
+            return None
+        path = Path(workspace).expanduser().resolve(strict=False)
+        if path.exists() and path.is_dir():
+            return path
+        return None
+
+    def _block_missing_workspace(self, task: dict) -> None:
+        task_id = task["id"]
+        workspace = task.get("workspace_path") or "none recorded"
+        reason = (
+            "Task has no valid saved workspace, so it was blocked instead of "
+            f"running in the LumaKit app directory. Recorded workspace: {workspace}"
+        )
+        print(f"[task-runner] blocking task {task_id}: {reason}")
+        task_store.update_task(task_id, status="blocked", result=reason)
+        self._notify(
+            f"Task blocked: {task['title']}\n\n{reason}\n\n"
+            "Set the desired working directory in the web UI and create the task again.",
+            task.get("owner_chat_id"),
+        )
 
     def _update_code_index_after_tool(self, name: str, inputs: dict, result: dict) -> None:
         if self._code_index is None or not result.get("success"):

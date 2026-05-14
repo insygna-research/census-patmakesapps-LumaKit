@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from core import task_store
+from core.paths import get_repo_root
 
 
 def _fmt_task(task: dict) -> str:
@@ -34,6 +35,8 @@ def get_create_task_tool():
         "description": (
             "Create a new autonomous background task for Lumi to work on independently. "
             "Lumi will plan, execute, and report back at the due date. "
+            "The task automatically captures the current active workspace and will keep "
+            "using that directory for planning and execution even if the user navigates away. "
             "Use this when the user gives a goal that takes hours or days to complete. "
             "IMPORTANT — start_at vs due_at: if the user says 'start at 5pm' / 'begin tomorrow morning' / "
             "'kick off at X', that's start_at (when planning begins). If they say 'by 5pm' / 'deadline is X' / "
@@ -95,6 +98,7 @@ def _create_task(inputs: dict) -> dict:
 
     owner = inputs.get("owner_chat_id") or str(_get_active_user() or "")
     start_at = inputs.get("start_at") or None
+    workspace_path = str(get_repo_root().resolve(strict=False))
 
     task_id = task_store.create_task(
         title=inputs["title"],
@@ -103,6 +107,7 @@ def _create_task(inputs: dict) -> dict:
         owner_chat_id=owner or None,
         due_at=inputs.get("due_at") or None,
         start_at=start_at,
+        workspace_path=workspace_path,
     )
 
     if start_at:
@@ -116,7 +121,7 @@ def _create_task(inputs: dict) -> dict:
             f"and will ping you with updates. Use /tasks to check status anytime."
         )
 
-    return {"task_id": task_id, "message": msg}
+    return {"task_id": task_id, "workspace_path": workspace_path, "message": msg}
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +213,7 @@ def _get_task_status(inputs: dict) -> dict:
         "goal": task["goal"],
         "status": task["status"],
         "due_at": task.get("due_at"),
+        "workspace_path": task.get("workspace_path") or "",
         "current_step": f"{step_idx+1}/{len(plan)}" if plan else "N/A",
         "current_step_description": current_step_desc,
         "steps_total": len(plan),

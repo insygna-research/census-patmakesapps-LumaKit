@@ -881,6 +881,7 @@ async def websocket_chat(ws: WebSocket):
                     "run_state": run_state,
                     "run_error": run_error,
                     "streamed": bool(response.get("streamed")),
+                    "messages": session["messages"],
                     **_workspace_payload(session["workspace_path"]),
                 })
         except Exception as e:
@@ -1072,6 +1073,7 @@ async def websocket_chat(ws: WebSocket):
                         "run_state": "completed",
                         "run_error": "",
                         "streamed": False,
+                        "messages": session["messages"],
                         **_workspace_payload(session["workspace_path"]),
                     })
                     continue

@@ -4,6 +4,7 @@ import tempfile
 import time
 
 from core.interrupts import OperationInterrupted, raise_if_interrupted
+from core.paths import get_repo_root
 
 
 def get_execute_python_tool():
@@ -40,6 +41,7 @@ def _execute_python(inputs):
             text=True,
             encoding='utf-8',
             errors='replace',
+            cwd=get_repo_root(),
             start_new_session=(os.name != 'nt'),
         )
         deadline = time.monotonic() + 10
