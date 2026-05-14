@@ -57,6 +57,10 @@ Respond with ONLY a JSON array of step objects. Each step must have these keys:
 - "success_criteria": how to know the step succeeded
 - "check_in_minutes": how many minutes before the runner should check back after this step
 
+Do not create standalone wait, sleep, delay, or pause steps. Put the delay in
+the previous actionable step's check_in_minutes instead. If the task has a hard
+due date, make sure every planned check-in can happen before that deadline.
+
 Example format:
 [
   {{
@@ -594,7 +598,14 @@ class TaskRunner:
         if extra_summary:
             history_full += f"\n[final] {extra_summary}"
 
-        status = "forcibly completed (deadline passed)" if forced else "completed"
+        all_steps_reached = bool(plan) and task.get("current_step", 0) >= len(plan)
+        incomplete_after_deadline = forced and not all_steps_reached
+        status = (
+            "deadline reached before completion"
+            if incomplete_after_deadline
+            else "forcibly completed (deadline passed)" if forced
+            else "completed"
+        )
 
         prompt = _REPORT_PROMPT.format(
             goal=task["goal"],
@@ -610,8 +621,11 @@ class TaskRunner:
         except Exception as e:
             report = f"Could not generate report: {e}\n\nSteps completed: {steps_done}/{len(plan)}"
 
-        final_status = "done"
-        task_store.complete_task(task_id, report)
+        final_status = "failed" if incomplete_after_deadline else "done"
+        if incomplete_after_deadline:
+            task_store.fail_task(task_id, report)
+        else:
+            task_store.complete_task(task_id, report)
 
         header = "Task complete" if not forced else "Task deadline reached"
         self._notify(

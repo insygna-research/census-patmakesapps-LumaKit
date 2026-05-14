@@ -147,6 +147,38 @@ def _workspace_payload(path: str | Path) -> dict:
     }
 
 
+def _display_transcript(messages: list[dict] | None) -> list[dict]:
+    """Return only messages that should be replayed in the chat UI."""
+    transcript = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = str(msg.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            transcript.append(dict(msg))
+    return transcript
+
+
+def _append_display_message(session: dict, role: str, content: str) -> None:
+    text = str(content or "").strip()
+    if not text:
+        return
+    session.setdefault("display_messages", []).append(
+        timestamp_message({"role": role, "content": text})
+    )
+
+
+def _save_web_chat(session: dict) -> None:
+    save_chat(
+        session["chat_id"],
+        session["title"],
+        session["messages"],
+        owner_id=WEB_USER_ID,
+        display_messages=session.get("display_messages") or [],
+    )
+
+
 def _decode_image_payload(payload: dict | None) -> bytes | None:
     if not isinstance(payload, dict):
         return None
@@ -916,6 +948,7 @@ async def websocket_chat(ws: WebSocket):
             "title": resumed["title"],
             "first_message_sent": True,
             "messages": resumed["messages"],
+            "display_messages": _display_transcript(resumed.get("display_messages") or resumed["messages"]),
             "workspace_path": str(workspace),
         }
         agent.messages = resumed["messages"]
@@ -926,6 +959,7 @@ async def websocket_chat(ws: WebSocket):
             "title": "",
             "first_message_sent": False,
             "messages": agent.messages,
+            "display_messages": [],
             "workspace_path": str(workspace),
         }
     _prepare_web_turn(agent, session)
@@ -936,7 +970,7 @@ async def websocket_chat(ws: WebSocket):
             "type": "chat_loaded",
             "chat_id": session["chat_id"],
             "title": session["title"],
-            "messages": resumed["messages"],
+            "messages": session["display_messages"],
             **_workspace_payload(session["workspace_path"]),
         })
     else:
@@ -958,6 +992,11 @@ async def websocket_chat(ws: WebSocket):
         process confirm_response / stop messages while the agent is working."""
         try:
             _prepare_web_turn(agent, session)
+            _append_display_message(
+                session,
+                "user",
+                text or "What do you see in this image?",
+            )
             # Snapshot the current ContextVars (auth, interface, memory user,
             # react context) so the worker thread sees them. run_in_executor
             # does NOT propagate contextvars by default.
@@ -975,10 +1014,11 @@ async def websocket_chat(ws: WebSocket):
                 response = await loop.run_in_executor(None, ctx.run, agent.ask_llm, text)
             reply = response.get("message", {}).get("content", "")
             session["messages"] = agent.messages
+            _append_display_message(session, "assistant", reply)
             if not session["first_message_sent"]:
                 session["title"] = make_title(text or "Photo")
                 session["first_message_sent"] = True
-            save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
+            _save_web_chat(session)
             set_active_chat(WEB_USER_ID, session["chat_id"])
             set_chat_workspace(session["chat_id"], session["workspace_path"], owner_id=WEB_USER_ID)
             snap = agent.run_controller.get_status_snapshot()
@@ -995,7 +1035,7 @@ async def websocket_chat(ws: WebSocket):
                     "run_state": run_state,
                     "run_error": run_error,
                     "streamed": bool(response.get("streamed")),
-                    "messages": session["messages"],
+                    "messages": session["display_messages"],
                     **_workspace_payload(session["workspace_path"]),
                 })
         except Exception as e:
@@ -1085,7 +1125,7 @@ async def websocket_chat(ws: WebSocket):
                 session["messages"] = agent.messages
                 set_chat_workspace(session["chat_id"], session["workspace_path"], owner_id=WEB_USER_ID)
                 if session["first_message_sent"] and len(agent.messages) > 1:
-                    save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
+                    _save_web_chat(session)
                 await ws.send_json({
                     "type": "workspace_updated",
                     **_workspace_payload(session["workspace_path"]),
@@ -1107,13 +1147,16 @@ async def websocket_chat(ws: WebSocket):
                     session["workspace_path"] = str(workspace)
                     agent.messages = loaded["messages"]
                     session["messages"] = agent.messages
+                    session["display_messages"] = _display_transcript(
+                        loaded.get("display_messages") or loaded["messages"]
+                    )
                     _prepare_web_turn(agent, session)
                     set_active_chat(WEB_USER_ID, session["chat_id"])
                     await ws.send_json({
                         "type": "chat_loaded",
                         "chat_id": session["chat_id"],
                         "title": session["title"],
-                        "messages": loaded["messages"],
+                        "messages": session["display_messages"],
                         **_workspace_payload(session["workspace_path"]),
                     })
                 else:
@@ -1133,6 +1176,7 @@ async def websocket_chat(ws: WebSocket):
                 agent.set_workspace_root(session["workspace_path"])
                 agent.messages = [agent.build_system_message()]
                 session["messages"] = agent.messages
+                session["display_messages"] = []
                 _prepare_web_turn(agent, session)
                 set_active_chat(WEB_USER_ID, session["chat_id"])
                 await ws.send_json({
@@ -1171,10 +1215,11 @@ async def websocket_chat(ws: WebSocket):
                     assistant_message = timestamp_message({"role": "assistant", "content": fast_reply})
                     agent.messages.extend([user_message, assistant_message])
                     session["messages"] = agent.messages
+                    session.setdefault("display_messages", []).extend([user_message, assistant_message])
                     if not session["first_message_sent"]:
                         session["title"] = make_title(text)
                         session["first_message_sent"] = True
-                    save_chat(session["chat_id"], session["title"], session["messages"], owner_id=WEB_USER_ID)
+                    _save_web_chat(session)
                     set_active_chat(WEB_USER_ID, session["chat_id"])
                     set_chat_workspace(session["chat_id"], session["workspace_path"], owner_id=WEB_USER_ID)
                     await ws.send_json({
@@ -1187,7 +1232,7 @@ async def websocket_chat(ws: WebSocket):
                         "run_state": "completed",
                         "run_error": "",
                         "streamed": False,
-                        "messages": session["messages"],
+                        "messages": session["display_messages"],
                         **_workspace_payload(session["workspace_path"]),
                     })
                     continue
@@ -1204,6 +1249,10 @@ async def websocket_chat(ws: WebSocket):
                         # through and treat this as a fresh turn.
                         await ws.send_json({"type": "status", "text": "Lumi is thinking..."})
                         agent_task = asyncio.create_task(run_agent_request(text))
+                    else:
+                        _append_display_message(session, "user", text)
+                        if session["first_message_sent"]:
+                            _save_web_chat(session)
                     continue
 
                 await ws.send_json({"type": "status", "text": "Lumi is looking at the image..." if image_data else "Lumi is thinking..."})
