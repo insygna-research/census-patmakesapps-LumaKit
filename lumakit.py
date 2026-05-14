@@ -392,7 +392,7 @@ def _write_windows_cmd_shortcut(*, target: Path, python_executable: Path, workin
 def command_shortcut_install(args) -> int:
     python_executable = Path(sys.executable).resolve()
     working_dir = REPO_ROOT
-    icon_path = (REPO_ROOT / "photos" / "lumakit_cat_logo.png").resolve()
+    icon_path = (REPO_ROOT / "photos" / "lumi_desktop_icon_no_bg.png").resolve()
 
     if sys.platform.startswith("linux"):
         targets: list[Path] = []
