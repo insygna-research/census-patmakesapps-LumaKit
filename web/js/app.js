@@ -1385,6 +1385,8 @@ function renderHistoryEntry(entry) {
     const type = entry.type || 'event';
     const ts = formatTaskTimestamp(entry.timestamp);
     let text = '';
+    let label = type;
+    let extraClass = '';
     if (type === 'plan_generated') {
         const steps = Array.isArray(entry.steps) ? entry.steps : [];
         text = `Plan generated with ${entry.step_count || steps.length} step${(entry.step_count || steps.length) === 1 ? '' : 's'}.`;
@@ -1394,11 +1396,41 @@ function renderHistoryEntry(entry) {
         text = `Planning retry #${entry.attempt} — next at ${formatTaskTimestamp(entry.next_run_at)}. ${entry.error || ''}`;
     } else if (type === 'workspace_fallback') {
         text = `Workspace missing (${entry.recorded}); using fallback ${entry.fallback}.`;
+    } else if (type === 'step_activity') {
+        // Live progress events emitted from inside an in-flight step. Render
+        // them compactly so the activity feed reads like a running log.
+        const stepNum = (entry.step_index ?? 0) + 1;
+        const kind = entry.kind || 'activity';
+        extraClass = 'task-activity-live';
+        if (kind === 'thinking') {
+            label = `step ${stepNum} · thinking`;
+            text = `Round ${entry.round || '?'} — model is deciding next action.`;
+        } else if (kind === 'tool') {
+            label = `step ${stepNum} · tool`;
+            text = `${entry.tool || '?'}${entry.detail ? ` — ${entry.detail}` : ''}`;
+        } else if (kind === 'tool_error') {
+            label = `step ${stepNum} · tool error`;
+            extraClass = 'task-activity-live task-activity-error';
+            text = `${entry.tool || '?'} failed: ${entry.detail || ''}`;
+        } else if (kind === 'answer') {
+            label = `step ${stepNum} · drafting answer`;
+            text = entry.detail || '(no preview)';
+        } else if (kind === 'error') {
+            label = `step ${stepNum} · error`;
+            extraClass = 'task-activity-live task-activity-error';
+            text = entry.detail || '';
+        } else {
+            label = `step ${stepNum} · ${kind}`;
+            text = entry.detail || JSON.stringify(entry);
+        }
+    } else if (type === 'step_retry') {
+        text = `Step ${(entry.step_index ?? 0) + 1} retry #${entry.attempt || '?'} — next at ${formatTaskTimestamp(entry.next_run_at)}. ${entry.reason || ''}`;
+        extraClass = 'task-activity-error';
     } else {
         text = entry.summary || entry.description || JSON.stringify(entry);
     }
-    return `<div class="task-activity-entry">
-        <div class="task-activity-meta"><span>${escapeHtml(type)}</span><span>${escapeHtml(ts)}</span></div>
+    return `<div class="task-activity-entry ${extraClass}">
+        <div class="task-activity-meta"><span>${escapeHtml(label)}</span><span>${escapeHtml(ts)}</span></div>
         <div class="task-activity-text">${escapeHtml(text)}</div>
     </div>`;
 }

@@ -55,6 +55,24 @@ RETRYABLE_STEP_RUNTIME_RE = re.compile(
 )
 
 
+def _summarize_tool_args(name: str | None, inputs: dict) -> str:
+    """One-line summary of what a tool call is about to do, for live activity
+    feed. Pulls the most informative argument for common tools so the UI
+    shows "fetch https://..." instead of opaque "fetch".
+    """
+    if not isinstance(inputs, dict):
+        return ""
+    for key in ("url", "path", "file_path", "command", "query", "pattern", "symbol", "title"):
+        val = inputs.get(key)
+        if val:
+            text = str(val)
+            return text if len(text) <= 120 else text[:117] + "..."
+    if isinstance(inputs.get("args"), list) and inputs["args"]:
+        joined = " ".join(str(a) for a in inputs["args"])
+        return joined[:120]
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Prompt templates
 # ---------------------------------------------------------------------------
@@ -406,7 +424,12 @@ class TaskRunner:
         )
 
         try:
-            step_output = self._run_agentic_step(step_prompt, owner_chat_id=task.get("owner_chat_id"))
+            step_output = self._run_agentic_step(
+                step_prompt,
+                owner_chat_id=task.get("owner_chat_id"),
+                task_id=task_id,
+                step_idx=step_idx,
+            )
         except Exception as e:
             step_output = f"Step execution error: {e}"
             print(f"[task-runner] step execution exception: {e}")
@@ -574,10 +597,33 @@ class TaskRunner:
     # Agentic step execution (LLM + tools loop)
     # ------------------------------------------------------------------
 
-    def _run_agentic_step(self, prompt: str, owner_chat_id: str | None = None) -> str:
+    def _run_agentic_step(
+        self,
+        prompt: str,
+        owner_chat_id: str | None = None,
+        task_id: int | None = None,
+        step_idx: int | None = None,
+    ) -> str:
         """Run a mini agent loop for one step. Returns the final text output."""
         registry = self._get_registry()
         ollama = self._get_ollama()
+
+        def emit(kind: str, **extra) -> None:
+            """Append a lightweight live-progress event to task history so the
+            UI can stream what's happening inside the step instead of waiting
+            for the step to finish.
+            """
+            if task_id is None or step_idx is None:
+                return
+            try:
+                task_store.append_history(task_id, {
+                    "type": "step_activity",
+                    "step_index": step_idx,
+                    "kind": kind,
+                    **extra,
+                })
+            except Exception:
+                pass
 
         tools_for_llm = [
             {
@@ -632,7 +678,8 @@ class TaskRunner:
         model = cfg["primary_model"]
         ollama.fallback_model = cfg.get("fallback_model")
 
-        for _ in range(self.MAX_TOOL_ROUNDS):
+        for round_idx in range(self.MAX_TOOL_ROUNDS):
+            emit("thinking", round=round_idx + 1)
             try:
                 response = ollama.chat(
                     model=model,
@@ -644,6 +691,7 @@ class TaskRunner:
                     priority="background",
                 )
             except Exception as e:
+                emit("error", detail=f"LLM call failed: {e}"[:300])
                 return f"LLM error during step: {e}"
 
             message = response.get("message", {})
@@ -651,7 +699,9 @@ class TaskRunner:
             tool_calls = message.get("tool_calls", [])
 
             if not tool_calls:
-                return (message.get("content") or "").strip() or "Step completed (no output)."
+                final = (message.get("content") or "").strip() or "Step completed (no output)."
+                emit("answer", detail=final[:200])
+                return final
 
             for tc in tool_calls:
                 fn = tc.get("function", {})
@@ -660,6 +710,8 @@ class TaskRunner:
                 command_text = str(inputs.get("command", "") or "")
                 if not command_text and isinstance(inputs.get("args"), list):
                     command_text = " ".join(str(part) for part in inputs.get("args", []))
+                detail = _summarize_tool_args(name, inputs)
+                emit("tool", tool=name or "?", detail=detail)
                 protected_shell = (
                     name in {"execute_shell", "run_command"}
                     and PROTECTED_TASK_SHELL_RE.search(command_text)
@@ -676,6 +728,9 @@ class TaskRunner:
                 else:
                     result = registry.execute(name, inputs)
                     self._update_code_index_after_tool(name, inputs, result)
+                if not result.get("success", True):
+                    err = str(result.get("error") or "")[:200]
+                    emit("tool_error", tool=name or "?", detail=err)
                 messages.append({
                     "role": "tool",
                     "name": name,

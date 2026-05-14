@@ -2084,6 +2084,16 @@ body {
     color: #ffd699;
 }
 
+.task-activity-entry.task-activity-live {
+    border-left: 2px solid var(--accent);
+    padding-left: 8px;
+    opacity: 0.85;
+}
+
+.task-activity-entry.task-activity-error {
+    border-left-color: var(--error);
+}
+
 .task-retry-banner .task-retry-reason {
     font-family: var(--mono, monospace);
     font-size: 11px;

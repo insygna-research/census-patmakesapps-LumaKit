@@ -8,9 +8,20 @@ import requests
 # Local Ollama is much more reliable when this process sends one generation
 # request at a time. Foreground chat, background tasks, heartbeat, and memory
 # tooling all share the same daemon, so uncoordinated concurrent calls can
-# fail or thrash model loads. Serialize chat requests process-wide and let
-# callers wait their turn.
+# fail or thrash model loads. Serialize *local* chat requests process-wide
+# and let callers wait their turn.
 _OLLAMA_CHAT_SLOT = threading.Lock()
+
+# Cloud-hosted models (model name ending in :cloud) are proxied to a remote
+# service that handles parallel generations fine, so they don't share the
+# single-slot bottleneck. A modest semaphore still provides backpressure so
+# we don't fire 50 concurrent requests at the API on bursty workloads.
+_OLLAMA_CLOUD_CONCURRENCY = 4
+_OLLAMA_CLOUD_SLOTS = threading.Semaphore(_OLLAMA_CLOUD_CONCURRENCY)
+
+
+def _is_cloud_model(model_name) -> bool:
+    return str(model_name or "").strip().lower().endswith(":cloud")
 
 _PRIORITY_VALUES = {
     "foreground": 0,
@@ -127,11 +138,36 @@ class OllamaClient:
     # this field. No tokens generated while idle — pure memory retention.
     DEFAULT_KEEP_ALIVE = "30m"
 
-    def _acquire_chat_slot(self, check_interrupt=None, priority="normal"):
+    def _acquire_chat_slot(self, check_interrupt=None, priority="normal", model=None):
+        """Acquire a generation slot. Returns a release token.
+
+        Cloud requests take a semaphore slot (up to N concurrent); local
+        requests go through the priority queue + single-slot lock as before.
+        """
+        if _is_cloud_model(model):
+            # Spin lightly so check_interrupt() can fire while we wait.
+            while True:
+                if _OLLAMA_CLOUD_SLOTS.acquire(timeout=0.1):
+                    return "cloud"
+                if check_interrupt:
+                    try:
+                        if check_interrupt():
+                            raise OllamaInterruptedError("Interrupted by /stop.")
+                    except OllamaInterruptedError:
+                        raise
+                    except Exception:
+                        pass
         _OLLAMA_GENERATION_SCHEDULER.acquire(
             priority=priority,
             check_interrupt=check_interrupt,
         )
+        return "local"
+
+    def _release_chat_slot(self, token):
+        if token == "cloud":
+            _OLLAMA_CLOUD_SLOTS.release()
+        else:
+            _OLLAMA_GENERATION_SCHEDULER.release()
 
     def _merge_stream_chunk(self, aggregate, payload, on_chunk=None):
         message = payload.get("message") or {}
@@ -265,7 +301,7 @@ class OllamaClient:
         self.last_model_used = None
         timeout = self.request_timeout if deadline is None else max(1, float(deadline))
         if not check_interrupt:
-            self._acquire_chat_slot(priority=priority)
+            token = self._acquire_chat_slot(priority=priority, model=model)
             try:
                 result, used_model = self._post_with_fallback(
                     model, messages, tools, stream, options, request_timeout=timeout,
@@ -274,19 +310,19 @@ class OllamaClient:
                 self.last_model_used = used_model
                 return result
             finally:
-                _OLLAMA_GENERATION_SCHEDULER.release()
+                self._release_chat_slot(token)
 
         outcome = {}
         done = threading.Event()
 
         def _run_request():
-            acquired = False
+            token = None
             try:
-                self._acquire_chat_slot(
+                token = self._acquire_chat_slot(
                     check_interrupt=check_interrupt,
                     priority=priority,
+                    model=model,
                 )
-                acquired = True
                 try:
                     result, used_model = self._post_with_fallback(
                         model, messages, tools, stream, options,
@@ -294,8 +330,8 @@ class OllamaClient:
                         on_chunk=on_chunk,
                     )
                 finally:
-                    if acquired:
-                        _OLLAMA_GENERATION_SCHEDULER.release()
+                    if token is not None:
+                        self._release_chat_slot(token)
                 outcome["result"] = result
                 outcome["used_model"] = used_model
             except Exception as exc:
