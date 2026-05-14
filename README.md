@@ -17,6 +17,8 @@ LumaKit gives an Ollama-backed model real tools: shell execution, repository wor
 
 LumaKit is not just a terminal wrapper around Ollama. The normal experience is a real web UI with conversation history, tool approvals, screenshots, tasks, and runtime settings.
 
+![Updated LumaKit Web UI](photos/updatedui_pic1.png)
+
 ![LumaKit Web UI](photos/lumi_full_ui_screenshot.png)
 
 The web UI is also where first-run model setup and later model switching now live:
@@ -301,20 +303,23 @@ Lumalok stores the local API token at `~/.lumalok/integration.json`. Secret valu
 agent.py              Core Lumi agent loop, prompts, tool rounds, and Ollama calls
 ollama_client.py      Ollama HTTP client, fallback handling, and generation scheduling
 lumakit.py            Launcher/service entrypoint
+tool_registry.py      Central tool registration and dispatch helpers
+lumakit.service.example
+                      Example systemd unit for always-on Linux installs
 surfaces/             User interfaces: web, Telegram, and CLI
 core/                 Shared runtime services, storage, auth, tasks, reminders, email, Telegram I/O
 tools/                Tool registry modules grouped by repo, runtime, web, memory, and comms
 web/                  Browser UI assets
 docs/                 User-facing setup and feature guides
 photos/               App screenshots and visual assets used by docs/web
-lumi/                 Bundled identity/default local data
-memory/               Repo-local development databases, ignored by git
+internal/             Internal packaging and launcher support files
+.github/              GitHub metadata and repository automation
 ```
 
 Runtime data normally lives under `~/.lumakit/`, including user config,
 chat/task/memory databases, notifications, and generated web media. The
-repo-local `.lumakit/` and `memory/` paths are development/runtime artifacts and
-are intentionally ignored.
+repo-local `.lumakit/` and other generated runtime artifacts are intentionally
+ignored.
 
 ## Development / debug entrypoints
 
