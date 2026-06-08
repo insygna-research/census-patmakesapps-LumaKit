@@ -1276,30 +1276,43 @@ function renderTaskDetail(task) {
     }
     actionButtons.push('<button class="task-action-btn task-action-danger" data-action="delete">Delete</button>');
 
+    // The plan is the agent's live todo list. Each item carries its own status
+    // (pending / in_progress / done) which it maintains as it works.
     const planHtml = plan.length
         ? `<ol class="task-plan-list">${plan.map((step, i) => {
-            const isCurrent = i === task.current_step && !isTerminal;
-            const isDone = i < task.current_step;
+            const status = (step && step.status) || (i < task.current_step ? 'done' : '');
+            const isDone = status === 'done';
+            const isCurrent = status === 'in_progress' && !isTerminal;
             const cls = isCurrent ? 'current' : isDone ? 'done' : '';
+            const mark = isDone ? '✓' : (i + 1) + '.';
             return `<li class="task-plan-step ${cls}">
-                <span class="task-plan-step-index">${i + 1}.</span>
+                <span class="task-plan-step-index">${mark}</span>
                 <span>${escapeHtml(step.description || '')}</span>
             </li>`;
         }).join('')}</ol>`
-        : '<p class="task-empty-note">No plan yet — Lumi will draft one shortly.</p>';
+        : '<p class="task-empty-note">No todo list yet — Lumi will draft one after it looks around.</p>';
 
-    // Retry banner — only when the current step is in backoff after a runtime
-    // failure. Tells the user *why* the task isn't moving and when it'll try
-    // again, instead of leaving them to guess from "Active".
-    const currentStep = (plan && plan[task.current_step]) || null;
-    const retryCount = currentStep ? Number(currentStep.runtime_retries || 0) : 0;
-    const retryReason = currentStep ? (currentStep.last_runtime_error || '') : '';
-    const retryNext = currentStep ? (currentStep.next_retry_at || task.next_run_at || '') : '';
-    const retryBannerHtml = (!isTerminal && retryCount > 0 && retryReason)
+    // Runtime-retry backoff is now tracked on the task (transient model/network
+    // outage), so the whole task is waiting to retry — not a single step.
+    const constraints = (task.constraints && typeof task.constraints === 'object') ? task.constraints : {};
+    const retryCount = Number(constraints._runtime_retries || 0);
+    const retryBannerHtml = (!isTerminal && retryCount > 0)
         ? `<div class="task-retry-banner">
-                <div><strong>Retrying step ${task.current_step + 1}</strong> — attempt ${retryCount}.
-                    Next try ${escapeHtml(formatFriendlyDate(retryNext) || retryNext || 'soon')}.</div>
-                <div class="task-retry-reason">${escapeHtml(retryReason)}</div>
+                <div><strong>Runtime hiccup</strong> — retry attempt ${retryCount}.
+                    Next try ${escapeHtml(formatFriendlyDate(task.next_run_at) || task.next_run_at || 'soon')}.</div>
+                <div class="task-retry-reason">Model/runtime was briefly unreachable; backing off instead of failing.</div>
+           </div>`
+        : '';
+
+    // Waiting banner — the task is parked on a real external wait (a build, a
+    // reply, a time window). Intentional, not a stall: it resumes on its own.
+    const waitingReason = constraints._wait_reason || '';
+    const waitUntil = constraints._wait_until || task.next_run_at || '';
+    const waitingBannerHtml = (!isTerminal && retryCount === 0 && waitingReason)
+        ? `<div class="task-wait-banner">
+                <div><strong>Waiting on something external</strong> — resumes
+                    ${escapeHtml(formatFriendlyDate(waitUntil) || waitUntil || 'soon')}.</div>
+                <div class="task-wait-reason">${escapeHtml(waitingReason)}</div>
            </div>`
         : '';
 
@@ -1320,6 +1333,7 @@ function renderTaskDetail(task) {
     $taskPanelBody.innerHTML = `
         <div class="task-actions-row">${actionButtons.join('')}</div>
         ${retryBannerHtml}
+        ${waitingBannerHtml}
 
         <section class="task-panel-section">
             <h4>Details</h4>
@@ -1349,7 +1363,7 @@ function renderTaskDetail(task) {
         ${resultHtml ? `<section class="task-panel-section"><h4>Result</h4>${resultHtml}</section>` : ''}
 
         <section class="task-panel-section">
-            <h4>Plan${plan.length ? ` (step ${Math.min(task.current_step + 1, plan.length)}/${plan.length})` : ''}</h4>
+            <h4>Todo list${plan.length ? ` (${plan.filter(s => (s.status || '') === 'done' || (plan.indexOf(s) < task.current_step)).length}/${plan.length} done)` : ''}</h4>
             ${planHtml}
         </section>
 
@@ -1424,8 +1438,43 @@ function renderHistoryEntry(entry) {
             text = entry.detail || JSON.stringify(entry);
         }
     } else if (type === 'step_retry') {
-        text = `Step ${(entry.step_index ?? 0) + 1} retry #${entry.attempt || '?'} — next at ${formatTaskTimestamp(entry.next_run_at)}. ${entry.reason || ''}`;
+        text = `Runtime retry #${entry.attempt || '?'} — next at ${formatTaskTimestamp(entry.next_run_at)}. ${entry.reason || ''}`;
         extraClass = 'task-activity-error';
+    } else if (type === 'step_wait' || type === 'task_wait') {
+        label = 'waiting';
+        text = `Waiting for ${entry.reason || 'something external'} — resumes ${formatTaskTimestamp(entry.resume_at)}.`;
+        extraClass = 'task-activity-wait';
+    } else if (type === 'task_started') {
+        text = 'Task started — looking at the workspace before acting.';
+    } else if (type === 'todos_updated') {
+        const total = entry.total ?? (Array.isArray(entry.todos) ? entry.todos.length : 0);
+        label = 'todo list';
+        text = `Updated todo list (${entry.done ?? 0}/${total} done).`;
+    } else if (type === 'activity') {
+        // Live progress from inside the continuous task loop.
+        const kind = entry.kind || 'activity';
+        extraClass = 'task-activity-live';
+        if (kind === 'thinking') {
+            label = 'thinking';
+            text = `Round ${entry.round || '?'} — deciding the next action.`;
+        } else if (kind === 'tool') {
+            label = 'tool';
+            text = `${entry.tool || '?'}${entry.detail ? ` — ${entry.detail}` : ''}`;
+        } else if (kind === 'tool_error') {
+            label = 'tool error';
+            extraClass = 'task-activity-live task-activity-error';
+            text = `${entry.tool || '?'} failed: ${entry.detail || ''}`;
+        } else if (kind === 'answer') {
+            label = 'note';
+            text = entry.detail || '(no preview)';
+        } else if (kind === 'wait') {
+            label = 'waiting';
+            extraClass = 'task-activity-live task-activity-wait';
+            text = entry.detail || 'waiting on something external';
+        } else {
+            label = kind;
+            text = entry.detail || JSON.stringify(entry);
+        }
     } else {
         text = entry.summary || entry.description || JSON.stringify(entry);
     }

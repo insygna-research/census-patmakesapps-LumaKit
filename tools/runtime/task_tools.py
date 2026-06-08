@@ -34,10 +34,14 @@ def get_create_task_tool():
         "name": "create_task",
         "description": (
             "Create a new autonomous background task for Lumi to work on independently. "
-            "Lumi will plan, execute, and report back at the due date. "
+            "Lumi plans the task, then works it start-to-finish, running steps back-to-back "
+            "with no artificial delays — it only pauses when it genuinely must wait for "
+            "something external (a build/deploy, a reply, a time window), and resumes on its "
+            "own. It reports back when the task is done (or at the due date if one is set). "
             "The task automatically captures the current active workspace and will keep "
             "using that directory for planning and execution even if the user navigates away. "
-            "Use this when the user gives a goal that takes hours or days to complete. "
+            "Use this when the user gives a goal they want handled in the background — "
+            "anything from a few minutes to days of work. "
             "IMPORTANT — start_at vs due_at: if the user says 'start at 5pm' / 'begin tomorrow morning' / "
             "'kick off at X', that's start_at (when planning begins). If they say 'by 5pm' / 'deadline is X' / "
             "'have it done by X', that's due_at (the deadline). They are different — don't put a start time "

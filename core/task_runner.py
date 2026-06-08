@@ -1,19 +1,27 @@
 """Autonomous task runner.
 
-A background thread that wakes up every `interval` seconds, looks for tasks
-whose next_run_at has passed, and advances them one step at a time.
+A background thread that wakes every `interval` seconds and drives autonomous
+tasks the way a capable engineer actually works a problem — not as a frozen,
+pre-baked plan executed by a series of amnesiac sub-agents.
 
-Lifecycle of a task
--------------------
-1. created  → status='planning', next_run_at=now
-2. runner picks it up → generates a JSON plan via LLM → status='active'
-3. runner picks up each step in order:
-   - runs a dedicated LLM loop with tools for that step
-   - evaluates the output (success / partial / blocked / done)
-   - advances step, reschedules, or escalates
-4. when all steps done (or evaluation says goal_met) → final report → status='done'
-5. if due_at passes before completion → force final report → status='done'|'failed'
-6. if evaluation says 'blocked' → notify owner, status='blocked', wait for reply
+How a task runs
+---------------
+Each task is ONE continuous agent session:
+
+1. created → status='planning' (queued, not started yet)
+2. runner picks it up → seeds a single conversation thread and tells the agent
+   to LOOK at the workspace first, reuse anything already there, keep a live
+   TODO list, and work the goal to completion. status='active'.
+3. the agent runs a continuous think → act → observe loop with the FULL tool
+   set, holding all of its context the whole time (no per-step memory wipe).
+   It maintains its own todo list via `update_todos`.
+4. the whole thread is persisted to the task store every round, so a task that
+   takes days survives restarts and resumes with full context.
+5. the task only sleeps when the agent calls `wait_until` for a real external
+   wait, when a transient model/runtime outage triggers backoff, or when the
+   per-tick fairness budget is hit (it resumes next tick).
+6. the agent calls `finish_task` when the goal is done (or genuinely can't be).
+   If a due_at passes first, the runner finalizes with whatever's done.
 """
 
 from __future__ import annotations
@@ -22,12 +30,13 @@ import json
 import os
 import re
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from core import task_store
-from core.paths import get_repo_root, workspace_context
+from core import summarizer, task_store
+from core.paths import get_data_dir, get_repo_root, workspace_context
 from core.runtime_config import get_effective_config_for_user
 from ollama_client import OllamaClient
 
@@ -48,18 +57,15 @@ def get_active_runner() -> "TaskRunner | None":
 
 
 RETRYABLE_STEP_RUNTIME_RE = re.compile(
-    r"LLM error during step:|Cannot reach Ollama server|Ollama stopped responding|"
-    r"unable to reach Ollama|model server|connection refused|connection reset|"
-    r"timed out|timeout",
+    r"LLM error during round:|LLM error during step:|Cannot reach Ollama server|"
+    r"Ollama stopped responding|unable to reach Ollama|model server|"
+    r"connection refused|connection reset|timed out|timeout",
     re.IGNORECASE,
 )
 
 
 def _summarize_tool_args(name: str | None, inputs: dict) -> str:
-    """One-line summary of what a tool call is about to do, for live activity
-    feed. Pulls the most informative argument for common tools so the UI
-    shows "fetch https://..." instead of opaque "fetch".
-    """
+    """One-line summary of what a tool call is about to do, for the live feed."""
     if not isinstance(inputs, dict):
         return ""
     for key in ("url", "path", "file_path", "command", "query", "pattern", "symbol", "title"):
@@ -73,95 +79,17 @@ def _summarize_tool_args(name: str | None, inputs: dict) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Prompt templates
-# ---------------------------------------------------------------------------
-
-_PLAN_PROMPT = """You are an autonomous planning agent. A user has given you a goal to accomplish.
-Break the goal into concrete, ordered steps that another agent can execute one at a time.
+_REPORT_PROMPT = """You are writing a short final report for an autonomous task you just worked on.
 
 Goal: {goal}
-Constraints: {constraints}
-Due date: {due_at}
-Current date/time: {now}
-Workspace: {workspace}
+Outcome: {status}
 
-Respond with ONLY a JSON array of step objects. Each step must have these keys:
-- "description": what to do in this step (be specific and actionable)
-- "success_criteria": how to know the step succeeded
-- "check_in_minutes": how many minutes before the runner should check back after this step
+What you did (todo list + recent activity):
+{summary}
 
-Do not create standalone wait, sleep, delay, or pause steps. Put the delay in
-the previous actionable step's check_in_minutes instead. If the task has a hard
-due date, make sure every planned check-in can happen before that deadline.
-
-Example format:
-[
-  {{
-    "description": "Search for current arbitrage opportunities between X and Y",
-    "success_criteria": "Have at least 3 options ranked by profit potential",
-    "check_in_minutes": 30
-  }}
-]
-
-Keep steps focused. Aim for 3-8 steps total. Output ONLY the JSON array, no other text."""
-
-
-_STEP_PROMPT = """You are an autonomous agent executing one step of a larger goal.
-
-Overall goal: {goal}
-Constraints: {constraints}
-Due date: {due_at}
-Workspace: {workspace}
-
-Current step ({step_num} of {total_steps}):
-{step_description}
-
-Success criteria: {success_criteria}
-
-History of completed steps so far:
-{history_summary}
-
-Execute this step now using your available tools. Be thorough but focused.
-When done, summarize exactly what you found/did and whether the success criteria were met."""
-
-
-_EVAL_PROMPT = """You are evaluating whether an agent step succeeded.
-
-Step description: {step_description}
-Success criteria: {success_criteria}
-Agent output: {step_output}
-
-Respond with ONLY a JSON object with these keys:
-- "verdict": one of "success", "partial", "failed", "blocked", "goal_met"
-  - "success": step criteria met, move on
-  - "partial": some progress but not fully done, retry with different approach
-  - "failed": step failed completely, move on anyway
-  - "blocked": agent needs human input to continue (explain in reason)
-  - "goal_met": the overall goal has been achieved, no more steps needed
-- "reason": one sentence explaining the verdict
-- "summary": 1-2 sentence summary of what was actually accomplished (for history)
-
-Output ONLY the JSON object."""
-
-
-_REPORT_PROMPT = """You are writing a final report for an autonomous task.
-
-Goal: {goal}
-Constraints: {constraints}
-Status: {status}
-Steps completed: {steps_done} of {total_steps}
-
-Full history:
-{history_full}
-
-Write a concise report (3-8 sentences) covering:
-1. What was accomplished
-2. Key findings or results
-3. What wasn't finished and why (if applicable)
-4. Any recommended next steps
-
-Write in plain, direct language. No bullet points, no headers."""
+Write a concise report (3-6 sentences) in plain, direct language covering what
+was accomplished, key results, and anything left unfinished and why. No headers,
+no bullet points."""
 
 
 # ---------------------------------------------------------------------------
@@ -169,45 +97,42 @@ Write in plain, direct language. No bullet points, no headers."""
 # ---------------------------------------------------------------------------
 
 class TaskRunner:
-    """Background thread that advances autonomous tasks."""
+    """Background thread that drives autonomous tasks to completion as a single
+    continuous agent session per task."""
 
-    # How many times to retry a failed step before moving on
-    MAX_STEP_RETRIES = 2
-    # How many times to retry transient model/runtime failures before failing
-    # the task. These are infrastructure failures, not user-blocking states.
+    # Transient model/runtime failures to ride out before failing the task.
     MAX_RUNTIME_RETRIES = 12
-    # How many times to retry a failed planning pass within a single tick
-    MAX_PLAN_RETRIES = 2
-    # How many planning ticks to retry with backoff before giving up entirely
-    MAX_PLAN_TICK_ATTEMPTS = 4
-    # Minutes between planning retries, indexed by attempt number
-    PLAN_BACKOFF_MINUTES = (2, 10, 30, 120)
-    # Hard cap on LLM rounds per step execution
-    MAX_TOOL_ROUNDS = 14
-    # Seconds per LLM call in a step
+    # Seconds per LLM call.
     STEP_LLM_DEADLINE = 180
-    # Token budget for structured LLM calls (planning, evaluation, report)
-    STRUCTURED_NUM_PREDICT = 4096
+    # Token budget for a work round — tight on purpose so the model acts
+    # instead of writing an essay before each tool call.
+    AGENTIC_NUM_PREDICT = 1536
+    # Token budget for one-shot structured calls (final report, compaction).
+    STRUCTURED_NUM_PREDICT = 2048
+    # Most model rounds a task may run in one continuous drive before yielding
+    # the runner thread (it resumes immediately next tick). Keeps tasks fair.
+    MAX_ROUNDS_PER_DRIVE = 50
+    # Wall-clock budget (seconds) a single task may hold the runner per tick.
+    TASK_TICK_BUDGET_SECONDS = 600
+    # How many times to nudge a model that produced prose but no tool call
+    # before treating it as finished.
+    MAX_NUDGES = 1
+    # How many real external waits a task may take before we treat it as stuck.
+    MAX_WAITS = 60
+    MIN_WAIT_MINUTES = 1
+    MAX_WAIT_MINUTES = 60 * 24 * 14  # 14 days
 
     def __init__(
         self,
         interval: int = 60,
         notify: Callable[[str, str | None], None] | None = None,
     ):
-        """
-        interval: poll interval in seconds
-        notify: callable(message, chat_id) — sends a message to a Telegram user.
-                chat_id=None means owner.
-        """
         self._interval = interval
         self._notify = notify or (lambda msg, cid: print(f"[task] {msg}"))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        # Per-task locks so one slow task can't block other tasks. Ollama
-        # concurrency is already serialized inside OllamaClient.
         self._task_locks: dict[int, threading.Lock] = {}
         self._task_locks_guard = threading.Lock()
-        # Heartbeat — surfaced via the API so the UI can detect a wedged thread.
         self._last_tick_at: datetime | None = None
 
         # Lazy — built on first use so we don't slow down startup
@@ -222,8 +147,6 @@ class TaskRunner:
 
     def start(self) -> None:
         self._stop.clear()
-        # Catch-up pass: surface stale schedules so users see progress on tasks
-        # that were due while the service was down.
         try:
             self._log_catch_up()
         except Exception as e:
@@ -261,22 +184,23 @@ class TaskRunner:
 
     def _tick(self) -> None:
         self._last_tick_at = datetime.now()
-        # Check overdue tasks first (past due_at, not yet finalized)
         for task in task_store.get_overdue_tasks():
             with self._lock_for(task["id"]):
                 workspace = self._resolve_task_workspace_or_fallback(task)
                 with workspace_context(workspace):
                     self._finalize_overdue(task)
 
-        # Then process tasks whose next_run_at has passed
         for task in task_store.get_due_tasks():
+            if self._stop.is_set():
+                break
             with self._lock_for(task["id"]):
                 workspace = self._resolve_task_workspace_or_fallback(task)
                 with workspace_context(workspace):
-                    if task["status"] == "planning":
-                        self._run_planning(task)
-                    elif task["status"] == "active":
-                        self._run_step(task)
+                    status = task["status"]
+                    if status == "planning" or (status == "active" and not task.get("messages")):
+                        self._begin_task(task)
+                    elif status == "active":
+                        self._drive(task)
 
     def _lock_for(self, task_id: int) -> threading.Lock:
         with self._task_locks_guard:
@@ -290,342 +214,535 @@ class TaskRunner:
         return self._last_tick_at
 
     # ------------------------------------------------------------------
-    # Planning pass
+    # Task start: seed the continuous session
     # ------------------------------------------------------------------
 
-    def _run_planning(self, task: dict) -> None:
+    def _begin_task(self, task: dict) -> None:
         task_id = task["id"]
-        print(f"[task-runner] planning task {task_id}: {task['title']}")
+        print(f"[task-runner] starting task {task_id}: {task['title']}")
 
-        try:
-            constraints_str = json.dumps(task["constraints"]) if task["constraints"] else "none"
-            prompt = _PLAN_PROMPT.format(
-                goal=task["goal"],
-                constraints=constraints_str,
-                due_at=task.get("due_at") or "no hard deadline",
-                now=datetime.now().strftime("%Y-%m-%d %H:%M"),
-                workspace=get_repo_root(),
-            )
+        constraints = {k: v for k, v in (task.get("constraints") or {}).items()
+                       if not str(k).startswith("_")}
+        constraints_str = json.dumps(constraints) if constraints else "none"
 
-            plan = None
-            last_err = None
-            for attempt in range(self.MAX_PLAN_RETRIES + 1):
-                try:
-                    raw = self._llm_call(prompt, owner_chat_id=task.get("owner_chat_id"))
-                    parsed = self._parse_json(raw)
-                    if isinstance(parsed, list) and parsed:
-                        plan = parsed
-                        break
-                    last_err = ValueError(f"LLM returned invalid plan: {raw[:200]}")
-                except (ValueError, json.JSONDecodeError) as e:
-                    last_err = e
-                    if attempt < self.MAX_PLAN_RETRIES:
-                        print(f"[task-runner] plan parse failed (attempt {attempt+1}), retrying: {e}")
-                        continue
-
-            if plan is None:
-                raise last_err or ValueError("Planning failed after retries")
-
-            # Ensure each step has required fields
-            for i, step in enumerate(plan):
-                step.setdefault("description", f"Step {i+1}")
-                step.setdefault("success_criteria", "complete")
-                step.setdefault("check_in_minutes", 60)
-                step["index"] = i
-                step["status"] = "pending"
-                step["output"] = ""
-                step["retries"] = 0
-
-            next_run = datetime.now().isoformat()
-            task_store.set_plan(task_id, plan, next_run_at=next_run)
-            task_store.append_history(task_id, {
-                "type": "plan_generated",
-                "step_count": len(plan),
-                "steps": [s["description"] for s in plan],
-            })
-
-            msg = (
-                f"Task planned: {task['title']}\n\n"
-                + "\n".join(f"{i+1}. {s['description']}" for i, s in enumerate(plan))
-                + f"\n\nStarting now. I'll check in as I go."
-            )
-            self._notify(msg, task.get("owner_chat_id"))
-            print(f"[task-runner] task {task_id} plan ready ({len(plan)} steps)")
-
-        except Exception as e:
-            # Soft retry with backoff across ticks so transient LLM/Ollama
-            # outages don't kill an otherwise-valid task. The attempt counter
-            # lives in constraints so it survives across runner restarts.
-            constraints = dict(task.get("constraints") or {})
-            attempt = int(constraints.get("plan_tick_attempts", 0)) + 1
-            constraints["plan_tick_attempts"] = attempt
-            print(f"[task-runner] planning attempt {attempt} failed for task {task_id}: {e}")
-
-            if attempt >= self.MAX_PLAN_TICK_ATTEMPTS:
-                task_store.fail_task(task_id, f"Planning failed after {attempt} attempts: {e}")
-                self._notify(
-                    f"Task failed during planning: {task['title']}\n\nError: {e}",
-                    task.get("owner_chat_id"),
-                )
-                return
-
-            mins = self.PLAN_BACKOFF_MINUTES[min(attempt - 1, len(self.PLAN_BACKOFF_MINUTES) - 1)]
-            next_run = (datetime.now() + timedelta(minutes=mins)).isoformat()
-            task_store.update_task(
-                task_id,
-                constraints=json.dumps(constraints),
-                next_run_at=next_run,
-            )
-            task_store.append_history(task_id, {
-                "type": "planning_retry",
-                "attempt": attempt,
-                "error": str(e)[:300],
-                "next_run_at": next_run,
-            })
-
-    # ------------------------------------------------------------------
-    # Step execution
-    # ------------------------------------------------------------------
-
-    def _run_step(self, task: dict) -> None:
-        task_id = task["id"]
-        plan = task["plan"]
-        step_idx = task["current_step"]
-
-        # All steps done?
-        if step_idx >= len(plan):
-            self._generate_and_send_report(task, forced=False)
-            return
-
-        step = plan[step_idx]
-        print(f"[task-runner] task {task_id} step {step_idx+1}/{len(plan)}: {step['description'][:60]}")
-
-        # Cheap pre-flight: if Ollama isn't reachable right now, don't burn a
-        # 180s LLM deadline finding that out. Reschedule on a short cadence
-        # instead so the task resumes promptly once the model is back.
-        probe_err = self._probe_ollama()
-        if probe_err is not None:
-            self._retry_step_runtime_error(task, step_idx, probe_err)
-            return
-
-        history_summary = self._format_history_summary(task["history"])
-        constraints_str = json.dumps(task["constraints"]) if task["constraints"] else "none"
-
-        step_prompt = _STEP_PROMPT.format(
-            goal=task["goal"],
-            constraints=constraints_str,
-            due_at=task.get("due_at") or "no hard deadline",
-            workspace=get_repo_root(),
-            step_num=step_idx + 1,
-            total_steps=len(plan),
-            step_description=step["description"],
-            success_criteria=step["success_criteria"],
-            history_summary=history_summary or "No prior steps.",
+        system = self._build_system_prompt()
+        kickoff = (
+            f"GOAL: {task['goal']}\n\n"
+            f"Title: {task['title']}\n"
+            f"Constraints: {constraints_str}\n"
+            f"Deadline: {task.get('due_at') or 'no hard deadline'}\n"
+            f"Workspace (your working directory): {get_repo_root()}\n"
+            f"Current date/time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+            "Work this goal to completion on your own. Start by looking at the "
+            "current state of the workspace — list what's already there and read "
+            "anything relevant — so you reuse existing work instead of redoing it. "
+            "Then lay out a todo list with update_todos and execute it, keeping the "
+            "list current as you go. Call finish_task when the whole goal is done."
         )
 
-        try:
-            step_output = self._run_agentic_step(
-                step_prompt,
-                owner_chat_id=task.get("owner_chat_id"),
-                task_id=task_id,
-                step_idx=step_idx,
-            )
-        except Exception as e:
-            step_output = f"Step execution error: {e}"
-            print(f"[task-runner] step execution exception: {e}")
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": kickoff},
+        ]
+        task_store.update_task(task_id, status="active")
+        task_store.save_session(task_id, messages, plan=[], current_step=0)
+        task_store.append_history(task_id, {"type": "task_started"})
+        self._notify(
+            f"Starting task: {task['title']}\n\nI'll work it start to finish and "
+            "report back when it's done.",
+            task.get("owner_chat_id"),
+        )
 
-        if self._is_retryable_step_runtime_error(step_output):
-            self._retry_step_runtime_error(task, step_idx, step_output)
-            return
+        fresh = task_store.get_task(task_id)
+        if fresh and fresh["status"] == "active" and not self._stop.is_set():
+            self._drive(fresh)
 
-        # Evaluate the output
-        verdict_data = self._evaluate_step(step, step_output, owner_chat_id=task.get("owner_chat_id"))
-        verdict = verdict_data.get("verdict", "failed")
-        summary = verdict_data.get("summary", step_output[:200])
-        reason = verdict_data.get("reason", "")
+    # ------------------------------------------------------------------
+    # Continuous drive loop
+    # ------------------------------------------------------------------
 
-        if verdict == "blocked" and self._is_retryable_step_runtime_error(reason):
-            self._retry_step_runtime_error(task, step_idx, reason)
-            return
+    def _drive(self, task: dict) -> None:
+        task_id = task["id"]
+        drive_started = time.monotonic()
+        rounds = 0
+        nudges = 0
 
-        print(f"[task-runner] task {task_id} step {step_idx+1} verdict: {verdict} — {reason}")
+        ollama = self._get_ollama()
+        registry = self._get_registry()
+        tools = self._build_tool_list(registry)
+        cfg = self._model_config(task.get("owner_chat_id"))
+        model = cfg["primary_model"]
+        ollama.fallback_model = cfg.get("fallback_model")
 
-        # Record in history
-        task_store.append_history(task_id, {
-            "type": "step_result",
-            "step_index": step_idx,
-            "description": step["description"],
-            "verdict": verdict,
-            "summary": summary,
-        })
+        while not self._stop.is_set():
+            task = task_store.get_task(task_id)
+            if not task or task["status"] != "active":
+                return
 
-        if verdict == "goal_met":
-            self._generate_and_send_report(task, forced=False, extra_summary=summary)
-            return
+            messages = task.get("messages") or []
+            if not messages:
+                self._begin_task(task)
+                return
 
-        if verdict == "blocked":
-            task_store.update_task(task_id, status="blocked")
-            self._notify(
-                f"Task blocked: {task['title']}\n\n"
-                f"Stuck on step {step_idx+1}: {step['description']}\n\n"
-                f"Reason: {reason}\n\n"
-                f"Reply with instructions and I'll resume.",
-                task.get("owner_chat_id"),
-            )
-            return
+            if (
+                rounds >= self.MAX_ROUNDS_PER_DRIVE
+                or (time.monotonic() - drive_started) >= self.TASK_TICK_BUDGET_SECONDS
+            ):
+                task_store.update_task(task_id, next_run_at=datetime.now().isoformat())
+                print(f"[task-runner] task {task_id} yielding after {rounds} round(s); resumes next tick")
+                return
 
-        if verdict in ("success", "failed"):
-            # Advance to next step
-            retries = step.get("retries", 0)
-            if verdict == "failed" and retries < self.MAX_STEP_RETRIES:
-                # Retry the same step
-                plan[step_idx]["retries"] = retries + 1
-                task_store.update_task(task_id, plan=json.dumps(plan))
-                mins = max(5, step.get("check_in_minutes", 30) // 2)
-                next_run = (datetime.now() + timedelta(minutes=mins)).isoformat()
-                task_store.update_task(task_id, next_run_at=next_run)
-                self._notify(
-                    f"Step {step_idx+1} needs a retry (attempt {retries+2}): {step['description'][:80]}",
-                    task.get("owner_chat_id"),
+            probe_err = self._probe_ollama()
+            if probe_err is not None:
+                self._handle_runtime_error(task, probe_err)
+                return
+
+            self._emit(task_id, "thinking", round=rounds + 1)
+            try:
+                response = ollama.chat(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    stream=False,
+                    deadline=self.STEP_LLM_DEADLINE,
+                    options={"num_predict": self.AGENTIC_NUM_PREDICT},
+                    priority="normal",
                 )
-            else:
-                # Move forward
-                mins = step.get("check_in_minutes", 60)
-                next_run = (datetime.now() + timedelta(minutes=mins)).isoformat()
-                task_store.advance_step(task_id, next_run_at=next_run)
+            except Exception as e:
+                self._handle_runtime_error(task, f"LLM error during round: {e}")
+                return
 
-                remaining = len(plan) - (step_idx + 1)
-                if remaining > 0:
-                    self._notify(
-                        f"Step {step_idx+1} done: {summary}\n\n"
-                        f"Next: {plan[step_idx+1]['description'][:80]}\n"
-                        f"({remaining} step{'s' if remaining != 1 else ''} remaining)",
-                        task.get("owner_chat_id"),
-                    )
+            self._clear_runtime_retries(task_id, task)
+            rounds += 1
+
+            message = response.get("message", {})
+            messages.append(message)
+            tool_calls = message.get("tool_calls", []) or []
+
+            if not tool_calls:
+                text = (message.get("content") or "").strip()
+                if nudges >= self.MAX_NUDGES:
+                    # The model is talking, not acting, and we've already nudged.
+                    # Treat its last message as the result and wrap up.
+                    self._emit(task_id, "answer", detail=text[:200])
+                    task_store.save_session(task_id, messages)
+                    self._finalize(task, "done", text or "Task finished.")
+                    return
+                nudges += 1
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "If the goal is fully complete, call finish_task with your "
+                        "report. If not, keep going — use your tools to make progress. "
+                        "Don't just describe what you would do; do it."
+                    ),
+                })
+                task_store.save_session(task_id, messages)
+                continue
+
+            nudges = 0
+            control = None
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name")
+                inputs = fn.get("arguments", {}) or {}
+
+                # Once the task is finishing or pausing, don't execute any more
+                # calls from this batch — but still append a tool result for each
+                # so the assistant's tool_calls stay paired (some models error on
+                # a dangling tool_call with no result when the thread resumes).
+                if control is not None:
+                    messages.append({
+                        "role": "tool", "name": name,
+                        "content": json.dumps({"success": False, "skipped": "task is finishing or pausing"}),
+                    })
+                    continue
+
+                if name == "update_todos":
+                    result = self._apply_todos(task_id, inputs)
+                elif name == "set_workspace":
+                    # Run it (sets the workspace for this drive) AND persist the
+                    # new directory on the task, so the agent's re-homing survives
+                    # tick boundaries and restarts instead of reverting to the
+                    # workspace captured when the task was created.
+                    result = self._run_tool(task_id, name, inputs)
+                    new_cwd = (result.get("data") or {}).get("cwd") if result.get("success") else None
+                    if new_cwd:
+                        task_store.update_task(task_id, workspace_path=str(new_cwd))
+                        self._emit(task_id, "tool", tool="set_workspace", detail=f"workspace → {new_cwd}"[:120])
+                elif name == "wait_until":
+                    reason, resume_at = self._parse_wait_request(inputs)
+                    self._emit(task_id, "wait", detail=f"{reason} → resume {resume_at}"[:200])
+                    messages.append({
+                        "role": "tool", "name": name,
+                        "content": json.dumps({"success": True, "waiting_until": resume_at, "reason": reason}),
+                    })
+                    control = ("wait", reason, resume_at)
+                    continue
+                elif name == "finish_task":
+                    outcome = str(inputs.get("outcome") or "done").strip().lower()
+                    if outcome not in {"done", "failed", "blocked"}:
+                        outcome = "done"
+                    report = str(inputs.get("report") or "").strip()
+                    self._emit(task_id, "answer", detail=(report or outcome)[:200])
+                    messages.append({
+                        "role": "tool", "name": name,
+                        "content": json.dumps({"success": True, "recorded": outcome}),
+                    })
+                    control = ("finish", outcome, report)
+                    continue
                 else:
-                    # That was the last step — generate report on next tick
-                    task_store.update_task(task_id, next_run_at=datetime.now().isoformat())
+                    result = self._run_tool(task_id, name, inputs)
 
-        elif verdict == "partial":
-            # Keep same step, give it more time
-            mins = step.get("check_in_minutes", 60)
-            next_run = (datetime.now() + timedelta(minutes=mins)).isoformat()
-            task_store.update_task(task_id, next_run_at=next_run)
+                if not result.get("success", True):
+                    self._emit(task_id, "tool_error", tool=name or "?",
+                               detail=str(result.get("error") or "")[:200])
+                messages.append({
+                    "role": "tool", "name": name, "content": json.dumps(result, default=str),
+                })
+
+            task_store.save_session(task_id, messages)
+
+            if control and control[0] == "wait":
+                self._schedule_wait(task, control[1], control[2])
+                return
+            if control and control[0] == "finish":
+                self._finalize(task, control[1], control[2])
+                return
+
+            # Keep context bounded for long/multi-day tasks.
+            messages, compacted = self._maybe_compact(messages, model)
+            if compacted:
+                task_store.save_session(task_id, messages)
+            # Loop immediately — drive to completion, no artificial gaps.
+
+    # ------------------------------------------------------------------
+    # Tool execution
+    # ------------------------------------------------------------------
+
+    def _run_tool(self, task_id: int, name: str | None, inputs: dict) -> dict:
+        registry = self._get_registry()
+        command_text = str(inputs.get("command", "") or "")
+        if not command_text and isinstance(inputs.get("args"), list):
+            command_text = " ".join(str(part) for part in inputs.get("args", []))
+        self._emit(task_id, "tool", tool=name or "?", detail=_summarize_tool_args(name, inputs))
+
+        protected_shell = (
+            name in {"execute_shell", "run_command"}
+            and PROTECTED_TASK_SHELL_RE.search(command_text)
+        )
+        if name in PROTECTED_TASK_TOOLS or protected_shell:
+            return {
+                "success": False,
+                "error": (
+                    f"{name} requires explicit user approval and cannot run "
+                    "inside an autonomous task."
+                ),
+                "toolName": name,
+            }
+        result = registry.execute(name, inputs)
+        self._update_code_index_after_tool(name, inputs, result)
+        return result
+
+    def _apply_todos(self, task_id: int, inputs: dict) -> dict:
+        raw = inputs.get("todos") or inputs.get("items") or []
+        todos: list[dict] = []
+        for item in raw:
+            if isinstance(item, dict):
+                desc = str(item.get("description") or item.get("text") or "").strip()
+                status = str(item.get("status") or "pending").strip().lower()
+            else:
+                desc, status = str(item).strip(), "pending"
+            if status not in {"pending", "in_progress", "done"}:
+                status = "pending"
+            if desc:
+                todos.append({"description": desc, "status": status})
+        done = sum(1 for t in todos if t["status"] == "done")
+        task_store.update_task(task_id, plan=json.dumps(todos), current_step=done)
+        task_store.append_history(task_id, {
+            "type": "todos_updated",
+            "todos": [{"description": t["description"], "status": t["status"]} for t in todos],
+            "done": done,
+            "total": len(todos),
+        })
+        return {"success": True, "todos": todos, "done": done, "total": len(todos)}
+
+    # ------------------------------------------------------------------
+    # Wait / blocked / finish handling
+    # ------------------------------------------------------------------
+
+    def _schedule_wait(self, task: dict, reason: str, resume_at: str) -> None:
+        task_id = task["id"]
+        constraints = dict(task.get("constraints") or {})
+        wait_count = int(constraints.get("_wait_count", 0)) + 1
+        if wait_count > self.MAX_WAITS:
+            self._finalize(
+                task, "blocked",
+                f"Paused to wait {wait_count} times without finishing (last: {reason}).",
+            )
+            return
+        constraints["_wait_count"] = wait_count
+        constraints["_wait_reason"] = reason
+        constraints["_wait_until"] = resume_at
+        task_store.update_task(
+            task_id, constraints=json.dumps(constraints), next_run_at=resume_at
+        )
+        task_store.append_history(task_id, {
+            "type": "task_wait", "reason": reason, "resume_at": resume_at, "wait_count": wait_count,
+        })
+        if wait_count == 1:
             self._notify(
-                f"Step {step_idx+1} partially done, continuing: {summary[:120]}",
+                f"Task '{task['title']}' is waiting on something external before it "
+                f"can continue: {reason}\n\nIt'll resume on its own around "
+                f"{self._friendly_time(resume_at)}.",
+                task.get("owner_chat_id"),
+            )
+        print(f"[task-runner] task {task_id} waiting until {resume_at}: {reason}")
+
+    def _finalize(self, task: dict, outcome: str, report: str) -> None:
+        task_id = task["id"]
+        # Clear any transient wait markers from constraints.
+        constraints = {k: v for k, v in (task.get("constraints") or {}).items()
+                       if not str(k).startswith("_wait")}
+        task_store.update_task(task_id, constraints=json.dumps(constraints))
+
+        if not report:
+            report = self._generate_report(task, outcome)
+
+        if outcome == "blocked":
+            task_store.update_task(task_id, status="blocked", result=report)
+            self._notify(
+                f"Task blocked: {task['title']}\n\n{report}\n\n"
+                "Reply with what you'd like me to do and I'll resume.",
+                task.get("owner_chat_id"),
+            )
+            print(f"[task-runner] task {task_id} blocked")
+            return
+        if outcome == "failed":
+            task_store.fail_task(task_id, report)
+            self._notify(f"Task failed: {task['title']}\n\n{report}", task.get("owner_chat_id"))
+            print(f"[task-runner] task {task_id} failed")
+            return
+        task_store.complete_task(task_id, report)
+        self._notify(f"Task complete: {task['title']}\n\n{report}", task.get("owner_chat_id"))
+        print(f"[task-runner] task {task_id} done")
+
+    def _parse_wait_request(self, inputs: dict) -> tuple[str, str]:
+        reason = str(inputs.get("reason") or "waiting on external state").strip()[:300]
+        now = datetime.now()
+        resume_dt: datetime | None = None
+        raw_at = inputs.get("resume_at")
+        if raw_at:
+            try:
+                resume_dt = datetime.fromisoformat(str(raw_at).replace("Z", "").strip())
+            except (ValueError, TypeError):
+                resume_dt = None
+        if resume_dt is None:
+            mins = inputs.get("resume_in_minutes")
+            try:
+                minutes = float(mins) if mins is not None else 10.0
+            except (ValueError, TypeError):
+                minutes = 10.0
+            resume_dt = now + timedelta(minutes=minutes)
+        min_dt = now + timedelta(minutes=self.MIN_WAIT_MINUTES)
+        max_dt = now + timedelta(minutes=self.MAX_WAIT_MINUTES)
+        if resume_dt < min_dt:
+            resume_dt = min_dt
+        elif resume_dt > max_dt:
+            resume_dt = max_dt
+        return reason, resume_dt.isoformat()
+
+    # ------------------------------------------------------------------
+    # Runtime-error backoff (transient model/network failures)
+    # ------------------------------------------------------------------
+
+    def _handle_runtime_error(self, task: dict, error_text: str) -> None:
+        task_id = task["id"]
+        constraints = dict(task.get("constraints") or {})
+        retries = int(constraints.get("_runtime_retries", 0)) + 1
+        constraints["_runtime_retries"] = retries
+        summary = str(error_text or "Runtime error")[:300]
+
+        if retries > self.MAX_RUNTIME_RETRIES:
+            result = (
+                f"Task failed after {self.MAX_RUNTIME_RETRIES} retries because the "
+                f"model/runtime was unavailable: {summary}"
+            )
+            task_store.fail_task(task_id, result)
+            self._notify(f"Task failed: {task['title']}\n\n{result}", task.get("owner_chat_id"))
+            return
+
+        backoff_secs = [30, 30, 60, 120, 300, 600, 900, 900, 900, 900, 900, 900]
+        secs = backoff_secs[min(retries - 1, len(backoff_secs) - 1)]
+        next_run = (datetime.now() + timedelta(seconds=secs)).isoformat()
+        task_store.update_task(task_id, constraints=json.dumps(constraints), next_run_at=next_run)
+        task_store.append_history(task_id, {
+            "type": "step_retry", "attempt": retries, "reason": summary,
+            "next_run_at": next_run, "backoff_seconds": secs,
+        })
+        if retries in {1, 3, 6, 12}:
+            wait_label = f"{secs}s" if secs < 60 else f"{secs // 60} minute(s)"
+            self._notify(
+                f"Temporary runtime issue on task '{task['title']}'; retrying in "
+                f"{wait_label} instead of blocking.",
                 task.get("owner_chat_id"),
             )
 
-    def _is_retryable_step_runtime_error(self, text: str) -> bool:
-        return bool(RETRYABLE_STEP_RUNTIME_RE.search(str(text or "")))
+    def _clear_runtime_retries(self, task_id: int, task: dict) -> None:
+        """Clear transient 'why am I paused' markers now that the task is making
+        progress again — the runtime-retry counter and the waiting banner state.
+        (The lifetime _wait_count cap is kept.)"""
+        constraints = task.get("constraints") or {}
+        if any(constraints.get(k) for k in ("_runtime_retries", "_wait_reason", "_wait_until")):
+            new = dict(constraints)
+            for k in ("_runtime_retries", "_wait_reason", "_wait_until"):
+                new.pop(k, None)
+            task_store.update_task(task_id, constraints=json.dumps(new))
+            task["constraints"] = new
 
     def _probe_ollama(self) -> str | None:
-        """Quick reachability check for the model server. Returns None if up,
-        or a short error string the retry path can record as the reason.
-        Cloud-hosted models still need the local daemon as a proxy, so the
-        /api/tags endpoint is the right liveness signal for both.
-        """
         try:
             self._get_ollama().tags(request_timeout=2)
             return None
         except Exception as e:
             return f"Ollama probe failed: {e}"
 
-    def _retry_step_runtime_error(self, task: dict, step_idx: int, error_text: str) -> None:
-        task_id = task["id"]
-        plan = task["plan"]
-        step = plan[step_idx]
-        retries = int(step.get("runtime_retries", 0)) + 1
-        step["runtime_retries"] = retries
-
-        summary = str(error_text or "Runtime error")[:300]
-        if retries > self.MAX_RUNTIME_RETRIES:
-            result = (
-                f"Task failed after {self.MAX_RUNTIME_RETRIES} retries because the model/runtime "
-                f"was unavailable while executing step {step_idx + 1}: {summary}"
-            )
-            task_store.append_history(task_id, {
-                "type": "step_result",
-                "step_index": step_idx,
-                "description": step.get("description", ""),
-                "verdict": "failed",
-                "summary": result,
-            })
-            task_store.fail_task(task_id, result)
-            self._notify(
-                f"Task failed: {task['title']}\n\n{result}",
-                task.get("owner_chat_id"),
-            )
-            return
-
-        # Backoff schedule (seconds) tuned for the common case: a brief
-        # connectivity blip or a hit cloud-quota window. Short upfront retries
-        # so the task resumes within seconds of the model coming back, then
-        # ramp to minute-scale once it's clearly a sustained outage.
-        backoff_secs = [30, 30, 60, 120, 300, 600, 900, 900, 900, 900, 900, 900]
-        secs = backoff_secs[min(retries - 1, len(backoff_secs) - 1)]
-        next_run_dt = datetime.now() + timedelta(seconds=secs)
-        next_run = next_run_dt.isoformat()
-
-        # Stash the latest error on the step so chat/UI surfaces can show
-        # *why* the task is waiting without scanning history.
-        step["last_runtime_error"] = summary
-        step["last_runtime_error_at"] = datetime.now().isoformat()
-        step["next_retry_at"] = next_run
-
-        task_store.update_task(task_id, plan=json.dumps(plan), next_run_at=next_run)
-        task_store.append_history(task_id, {
-            "type": "step_retry",
-            "step_index": step_idx,
-            "attempt": retries,
-            "reason": summary,
-            "next_run_at": next_run,
-            "backoff_seconds": secs,
-        })
-        if retries in {1, 3, 6, 12}:
-            wait_label = (
-                f"{secs}s" if secs < 60
-                else f"{secs // 60} minute{'s' if secs // 60 != 1 else ''}"
-            )
-            self._notify(
-                f"Temporary runtime issue on task '{task['title']}' step {step_idx + 1}; "
-                f"retrying in {wait_label} instead of blocking.",
-                task.get("owner_chat_id"),
-            )
-
     # ------------------------------------------------------------------
-    # Agentic step execution (LLM + tools loop)
+    # Reporting / finalize-on-deadline
     # ------------------------------------------------------------------
 
-    def _run_agentic_step(
-        self,
-        prompt: str,
-        owner_chat_id: str | None = None,
-        task_id: int | None = None,
-        step_idx: int | None = None,
-    ) -> str:
-        """Run a mini agent loop for one step. Returns the final text output."""
-        registry = self._get_registry()
-        ollama = self._get_ollama()
+    def _generate_report(self, task: dict, outcome: str) -> str:
+        plan = task.get("plan") or []
+        history = task.get("history") or []
+        todo_lines = "\n".join(
+            f"- [{t.get('status', '?')}] {t.get('description', '')}" for t in plan
+        ) if plan else "(no todo list recorded)"
+        recent = []
+        for h in history[-12:]:
+            d = h.get("detail") or h.get("summary") or h.get("reason") or ""
+            if d:
+                recent.append(f"- {d}")
+        summary = todo_lines + ("\n" + "\n".join(recent) if recent else "")
+        prompt = _REPORT_PROMPT.format(
+            goal=task.get("goal", ""), status=outcome, summary=summary[:4000]
+        )
+        try:
+            ollama = self._get_ollama()
+            cfg = self._model_config(task.get("owner_chat_id"))
+            ollama.fallback_model = cfg.get("fallback_model")
+            resp = ollama.chat(
+                model=cfg["primary_model"],
+                messages=[{"role": "user", "content": prompt}],
+                stream=False, deadline=60,
+                options={"num_predict": self.STRUCTURED_NUM_PREDICT},
+                priority="normal",
+            )
+            text = (resp.get("message", {}).get("content") or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            print(f"[task-runner] report generation failed: {e}")
+        done = sum(1 for t in plan if t.get("status") == "done")
+        return f"Task ended ({outcome}). Completed {done}/{len(plan)} planned items."
 
-        def emit(kind: str, **extra) -> None:
-            """Append a lightweight live-progress event to task history so the
-            UI can stream what's happening inside the step instead of waiting
-            for the step to finish.
-            """
-            if task_id is None or step_idx is None:
-                return
-            try:
-                task_store.append_history(task_id, {
-                    "type": "step_activity",
-                    "step_index": step_idx,
-                    "kind": kind,
-                    **extra,
-                })
-            except Exception:
-                pass
+    def _finalize_overdue(self, task: dict) -> None:
+        print(f"[task-runner] finalizing overdue task {task['id']}: {task['title']}")
+        plan = task.get("plan") or []
+        done = sum(1 for t in plan if t.get("status") == "done")
+        # Reaching the deadline with real progress is a completion, not a failure.
+        outcome = "failed" if (plan and done == 0) else "done"
+        report = self._generate_report(task, "deadline reached")
+        self._finalize(task, outcome, report)
 
-        tools_for_llm = [
+    # ------------------------------------------------------------------
+    # Context compaction
+    # ------------------------------------------------------------------
+
+    def _maybe_compact(self, messages: list, model: str) -> tuple[list, bool]:
+        try:
+            if not summarizer.needs_summarization(messages):
+                return messages, False
+            req = summarizer.build_summary_request(messages)
+            if not req:
+                return messages, False
+            resp = self._get_ollama().chat(
+                model=model, messages=req, stream=False, deadline=30,
+                options={"num_predict": self.STRUCTURED_NUM_PREDICT},
+                priority="normal",
+            )
+            summary_text = (resp.get("message", {}).get("content") or "").strip()
+            if not summary_text:
+                return messages, False
+            return summarizer.apply_summary(messages, summary_text), True
+        except Exception:
+            # Hard fallback: keep system + a recent tail, dropping any leading
+            # orphan tool messages so the thread stays valid.
+            if len(messages) <= 24:
+                return messages, False
+            head = messages[:1] if messages and messages[0].get("role") == "system" else []
+            tail = messages[-20:]
+            while tail and tail[0].get("role") == "tool":
+                tail = tail[1:]
+            return head + tail, True
+
+    # ------------------------------------------------------------------
+    # Prompt / tool assembly
+    # ------------------------------------------------------------------
+
+    def _build_system_prompt(self) -> str:
+        lumi_email = os.getenv("LUMI_EMAIL_ADDRESS", "").strip()
+        identity_parts = []
+        if lumi_email:
+            identity_parts.append(f"Your email address: {lumi_email}")
+        identity_file = get_data_dir() / "identity" / "identity.txt"
+        if identity_file.exists():
+            identity_parts.append(
+                f"Your identity file (existing accounts & credentials): {identity_file} — "
+                "read it before signing up for anything new, and append new accounts after creating them."
+            )
+        identity_block = "\n".join(identity_parts) + "\n\n" if identity_parts else ""
+
+        return (
+            "You are Lumi, working fully autonomously to complete a goal from start "
+            "to finish, the way a sharp, senior engineer would. No human is watching "
+            "each step — you decide what to do and you do it with your tools.\n\n"
+            "How to work:\n"
+            "- LOOK BEFORE YOU ACT. Inspect the workspace first (list files, read "
+            "what's relevant). Build on what already exists — if a needed file or "
+            "result is already there and valid, reuse it instead of regenerating it. "
+            "Never blindly redo work that's already done.\n"
+            "- Keep a live todo list with the update_todos tool. Lay it out after you've "
+            "looked around, then keep it current: mark items in_progress and done as you "
+            "go. The user watches this list.\n"
+            "- Work adaptively: take an action, observe the real result, decide the next "
+            "action from what actually happened — don't follow a frozen script.\n"
+            "- Verify your own work. Read back files you wrote, run the code, check the "
+            "output is actually correct before moving on.\n"
+            "- Act, don't narrate. Prefer calling a tool over writing about what you would do.\n"
+            "- For project overview/build/test/framework questions, call inspect_project. "
+            "For code, prefer find_definition / search_symbols / read_symbol. For git "
+            "status/diff/log use the git_* tools, not raw git via run_command.\n\n"
+            f"Current working directory: {get_repo_root()}\n"
+            "Relative paths AND shell commands (execute_shell/run_command) run from this "
+            "directory. If the goal is about building or working inside a specific folder, "
+            "call set_workspace to point at that folder FIRST — then your scripts, shell "
+            "commands, and relative paths all land in the right place and you won't have to "
+            "prefix everything with absolute paths or 'cd'. Don't write project files inside "
+            "the LumaKit application directory unless that's explicitly the working directory.\n\n"
+            f"{identity_block}"
+            "Finishing and waiting:\n"
+            "- When the ENTIRE goal is accomplished (and you've verified it), call "
+            "finish_task with outcome='done' and a clear report for the user.\n"
+            "- If you genuinely cannot proceed without a human (login, 2FA, payment, an "
+            "owner-only decision), call finish_task with outcome='blocked' and explain.\n"
+            "- If — and only if — you must wait for something external before you can "
+            "continue (a build/deploy, an email reply, a time/market window, a rate-limit "
+            "cooldown), call wait_until with a reason and resume_in_minutes. The task "
+            "sleeps and resumes automatically. Never use wait_until just to pace yourself."
+        )
+
+    def _build_tool_list(self, registry) -> list[dict]:
+        tools = [
             {
                 "type": "function",
                 "function": {
@@ -636,216 +753,111 @@ class TaskRunner:
             }
             for t in registry.list()
         ]
+        tools.append(self._todos_tool_schema())
+        tools.append(self._wait_tool_schema())
+        tools.append(self._finish_tool_schema())
+        return tools
 
-        lumi_email = os.getenv("LUMI_EMAIL_ADDRESS", "").strip()
-        identity_parts = []
-        if lumi_email:
-            identity_parts.append(f"Your email address: {lumi_email}")
-        from core.paths import get_data_dir
-        identity_file = get_data_dir() / "identity" / "identity.txt"
-        if identity_file.exists():
-            identity_parts.append(
-                f"Your identity file (existing accounts & credentials): {identity_file} — "
-                "read it before signing up for anything new, and append new accounts after creating them."
-            )
-        identity_block = "\n".join(identity_parts) + "\n\n" if identity_parts else ""
+    @staticmethod
+    def _todos_tool_schema() -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": "update_todos",
+                "description": (
+                    "Maintain your live TODO list for this task. Pass the FULL list "
+                    "each time — it replaces the previous one. Mark items in_progress "
+                    "and done as you work. The user sees this list, so keep it accurate."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "description": {"type": "string"},
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "done"],
+                                    },
+                                },
+                                "required": ["description", "status"],
+                            },
+                        }
+                    },
+                    "required": ["todos"],
+                },
+            },
+        }
 
-        system = (
-            "You are Lumi, an autonomous agent executing a specific task step. "
-            "Use your tools to complete the step described. "
-            "Be thorough — search the web, fetch pages, run code as needed.\n"
-            "For project overview, build/test command discovery, package manager, "
-            "framework, or entry-point questions, call inspect_project first. "
-            "For code body/source requests, use find_definition or search_symbols, "
-            "then read_symbol instead of stopping after a location lookup. "
-            "For git status, commit summaries, branch/upstream state, changed-file "
-            "reviews, or push readiness, use git_preflight, git_status, show_diff, "
-            "and git_log instead of raw git commands through run_command.\n\n"
-            f"Current working directory: {get_repo_root()}\n"
-            "Resolve relative file paths from that directory. Do not write project files "
-            "inside the LumaKit application directory unless it is explicitly the current "
-            "working directory.\n\n"
-            f"{identity_block}"
-            "When done, write a clear summary of what you found and did."
-        )
+    @staticmethod
+    def _wait_tool_schema() -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": "wait_until",
+                "description": (
+                    "Pause the task and resume later, ONLY when you must wait for "
+                    "something external (a build/deploy, an email/reply, a time or "
+                    "market window, a rate-limit cooldown). The task sleeps and resumes "
+                    "automatically. Never use this to pace your own work."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "What you are waiting for."},
+                        "resume_in_minutes": {"type": "number", "description": "Minutes to wait before resuming."},
+                        "resume_at": {"type": "string", "description": "Optional absolute ISO 8601 resume time."},
+                    },
+                    "required": ["reason"],
+                },
+            },
+        }
 
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ]
+    @staticmethod
+    def _finish_tool_schema() -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": "finish_task",
+                "description": (
+                    "Call this ONCE when the entire goal is fully accomplished (and "
+                    "verified), or when it truly cannot be done. Provide the outcome and "
+                    "a clear final report for the user."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "outcome": {
+                            "type": "string",
+                            "enum": ["done", "failed", "blocked"],
+                            "description": "done = goal achieved; failed = couldn't be done; blocked = needs a human (login/2FA/payment/owner decision).",
+                        },
+                        "report": {
+                            "type": "string",
+                            "description": "Final report for the user: what was accomplished, key results, anything left and why.",
+                        },
+                    },
+                    "required": ["outcome", "report"],
+                },
+            },
+        }
 
-        cfg = self._model_config(owner_chat_id)
-        model = cfg["primary_model"]
-        ollama.fallback_model = cfg.get("fallback_model")
+    # ------------------------------------------------------------------
+    # Live activity feed
+    # ------------------------------------------------------------------
 
-        for round_idx in range(self.MAX_TOOL_ROUNDS):
-            emit("thinking", round=round_idx + 1)
-            try:
-                response = ollama.chat(
-                    model=model,
-                    messages=messages,
-                    tools=tools_for_llm,
-                    stream=False,
-                    deadline=self.STEP_LLM_DEADLINE,
-                    options={"num_predict": self.STRUCTURED_NUM_PREDICT},
-                    priority="background",
-                )
-            except Exception as e:
-                emit("error", detail=f"LLM call failed: {e}"[:300])
-                return f"LLM error during step: {e}"
-
-            message = response.get("message", {})
-            messages.append(message)
-            tool_calls = message.get("tool_calls", [])
-
-            if not tool_calls:
-                final = (message.get("content") or "").strip() or "Step completed (no output)."
-                emit("answer", detail=final[:200])
-                return final
-
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                name = fn.get("name")
-                inputs = fn.get("arguments", {})
-                command_text = str(inputs.get("command", "") or "")
-                if not command_text and isinstance(inputs.get("args"), list):
-                    command_text = " ".join(str(part) for part in inputs.get("args", []))
-                detail = _summarize_tool_args(name, inputs)
-                emit("tool", tool=name or "?", detail=detail)
-                protected_shell = (
-                    name in {"execute_shell", "run_command"}
-                    and PROTECTED_TASK_SHELL_RE.search(command_text)
-                )
-                if name in PROTECTED_TASK_TOOLS or protected_shell:
-                    result = {
-                        "success": False,
-                        "error": (
-                            f"{name} requires explicit user approval and cannot run "
-                            "inside an autonomous task step."
-                        ),
-                        "toolName": name,
-                    }
-                else:
-                    result = registry.execute(name, inputs)
-                    self._update_code_index_after_tool(name, inputs, result)
-                if not result.get("success", True):
-                    err = str(result.get("error") or "")[:200]
-                    emit("tool_error", tool=name or "?", detail=err)
-                messages.append({
-                    "role": "tool",
-                    "name": name,
-                    "content": json.dumps(result),
-                })
-
-        # Hit round cap — ask for a summary
-        messages.append({"role": "user", "content": "Summarize what you've found so far."})
+    def _emit(self, task_id: int, kind: str, **extra) -> None:
         try:
-            final = ollama.chat(model=model, messages=messages, stream=False,
-                                deadline=self.STEP_LLM_DEADLINE,
-                                priority="background")
-            return (final.get("message", {}).get("content") or "").strip()
+            task_store.append_history(task_id, {"type": "activity", "kind": kind, **extra})
         except Exception:
-            return "Step hit round limit."
+            pass
 
     # ------------------------------------------------------------------
-    # Evaluation pass
+    # Model / registry / workspace helpers
     # ------------------------------------------------------------------
-
-    def _evaluate_step(self, step: dict, output: str, owner_chat_id: str | None = None) -> dict:
-        prompt = _EVAL_PROMPT.format(
-            step_description=step["description"],
-            success_criteria=step["success_criteria"],
-            step_output=output[:3000],
-        )
-        try:
-            raw = self._llm_call(prompt, owner_chat_id=owner_chat_id)
-            return self._parse_json(raw)
-        except Exception as e:
-            # Default to 'partial' so a flaky evaluation doesn't quietly march
-            # past a broken step. The runner will give the step another pass on
-            # the next check-in instead of advancing as if it had succeeded.
-            print(f"[task-runner] evaluation parse error: {e}")
-            return {"verdict": "partial", "reason": "eval parse failed, retrying step", "summary": output[:200]}
-
-    # ------------------------------------------------------------------
-    # Reporting
-    # ------------------------------------------------------------------
-
-    def _generate_and_send_report(
-        self, task: dict, forced: bool = False, extra_summary: str = ""
-    ) -> None:
-        task_id = task["id"]
-        plan = task["plan"]
-        history = task["history"]
-        steps_done = sum(1 for h in history if h.get("type") == "step_result")
-        constraints_str = json.dumps(task["constraints"]) if task["constraints"] else "none"
-
-        history_full = "\n".join(
-            f"[{h.get('type')}] {h.get('summary') or h.get('steps') or ''}"
-            for h in history
-        )
-        if extra_summary:
-            history_full += f"\n[final] {extra_summary}"
-
-        all_steps_reached = bool(plan) and task.get("current_step", 0) >= len(plan)
-        incomplete_after_deadline = forced and not all_steps_reached
-        status = (
-            "deadline reached before completion"
-            if incomplete_after_deadline
-            else "forcibly completed (deadline passed)" if forced
-            else "completed"
-        )
-
-        prompt = _REPORT_PROMPT.format(
-            goal=task["goal"],
-            constraints=constraints_str,
-            status=status,
-            steps_done=steps_done,
-            total_steps=len(plan),
-            history_full=history_full or "No steps were recorded.",
-        )
-
-        try:
-            report = self._llm_call(prompt, owner_chat_id=task.get("owner_chat_id"))
-        except Exception as e:
-            report = f"Could not generate report: {e}\n\nSteps completed: {steps_done}/{len(plan)}"
-
-        final_status = "failed" if incomplete_after_deadline else "done"
-        if incomplete_after_deadline:
-            task_store.fail_task(task_id, report)
-        else:
-            task_store.complete_task(task_id, report)
-
-        header = "Task complete" if not forced else "Task deadline reached"
-        self._notify(
-            f"{header}: {task['title']}\n\n{report}",
-            task.get("owner_chat_id"),
-        )
-        print(f"[task-runner] task {task_id} {final_status}")
-
-    def _finalize_overdue(self, task: dict) -> None:
-        print(f"[task-runner] finalizing overdue task {task['id']}: {task['title']}")
-        self._generate_and_send_report(task, forced=True)
-
-    # ------------------------------------------------------------------
-    # LLM helpers
-    # ------------------------------------------------------------------
-
-    def _llm_call(self, prompt: str, owner_chat_id: str | None = None) -> str:
-        """Single-shot LLM call with no tools."""
-        ollama = self._get_ollama()
-        cfg = self._model_config(owner_chat_id)
-        model = cfg["primary_model"]
-        ollama.fallback_model = cfg.get("fallback_model")
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            stream=False,
-            deadline=90,
-            options={"num_predict": self.STRUCTURED_NUM_PREDICT},
-            priority="background",
-        )
-        return (response.get("message", {}).get("content") or "").strip()
 
     def _model_config(self, owner_chat_id: str | None = None) -> dict:
         cfg = get_effective_config_for_user(owner_chat_id)
@@ -854,37 +866,9 @@ class TaskRunner:
             "fallback_model": cfg.get("fallback_model") or os.getenv("OLLAMA_FALLBACK_MODEL"),
         }
 
-    def _parse_json(self, text: str) -> dict | list:
-        """Extract and parse the first JSON object or array from text."""
-        text = text.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            lines = text.splitlines()
-            text = "\n".join(
-                l for l in lines if not l.startswith("```")
-            ).strip()
-        # Use raw_decode to find and parse the first valid JSON structure —
-        # avoids bracket-counting bugs with braces/brackets inside strings.
-        # Try whichever of { or [ appears first in the text.
-        decoder = json.JSONDecoder()
-        candidates = [(text.find(c), c) for c in ("{", "[") if text.find(c) != -1]
-        for idx, _ in sorted(candidates):
-            try:
-                obj, _ = decoder.raw_decode(text, idx)
-                return obj
-            except json.JSONDecodeError:
-                continue
-        raise ValueError(f"No JSON found in: {text[:200]}")
-
-    # ------------------------------------------------------------------
-    # Lazy init
-    # ------------------------------------------------------------------
-
     def _get_ollama(self) -> OllamaClient:
         if self._ollama is None:
-            self._ollama = OllamaClient(
-                fallback_model=os.getenv("OLLAMA_FALLBACK_MODEL")
-            )
+            self._ollama = OllamaClient(fallback_model=os.getenv("OLLAMA_FALLBACK_MODEL"))
         return self._ollama
 
     def _get_registry(self):
@@ -911,37 +895,24 @@ class TaskRunner:
         return None
 
     def _resolve_task_workspace_or_fallback(self, task: dict) -> Path:
-        """Return the task's workspace if usable; otherwise fall back to the
-        current repo root and record a one-time warning in history. Previously
-        this blocked the task entirely, which was too strict — a missing
-        workspace often means the user moved a folder, not that the task is
-        unsafe to run.
-        """
         resolved = self._resolve_task_workspace(task)
         if resolved is not None:
             return resolved
         fallback = get_repo_root()
         task_id = task["id"]
         recorded = task.get("workspace_path") or "none recorded"
-        # Only warn once per task to avoid flooding history on every tick.
         already_warned = any(
             isinstance(h, dict) and h.get("type") == "workspace_fallback"
             for h in (task.get("history") or [])
         )
         if not already_warned:
-            print(
-                f"[task-runner] task {task_id} workspace missing ({recorded}); "
-                f"falling back to {fallback}"
-            )
+            print(f"[task-runner] task {task_id} workspace missing ({recorded}); falling back to {fallback}")
             task_store.append_history(task_id, {
-                "type": "workspace_fallback",
-                "recorded": str(recorded),
-                "fallback": str(fallback),
+                "type": "workspace_fallback", "recorded": str(recorded), "fallback": str(fallback),
             })
             self._notify(
                 f"Task workspace missing for: {task['title']}\n\n"
-                f"Recorded: {recorded}\n"
-                f"Running in fallback: {fallback}",
+                f"Recorded: {recorded}\nRunning in fallback: {fallback}",
                 task.get("owner_chat_id"),
             )
         return fallback
@@ -967,17 +938,9 @@ class TaskRunner:
                 if changed_path:
                     self._code_index.update_file(changed_path)
 
-    # ------------------------------------------------------------------
-    # Format helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def _format_history_summary(history: list) -> str:
-        lines = []
-        for h in history:
-            if h.get("type") == "step_result":
-                lines.append(
-                    f"Step {h.get('step_index', '?')+1} [{h.get('verdict', '?')}]: "
-                    f"{h.get('summary', '')}"
-                )
-        return "\n".join(lines)
+    def _friendly_time(iso: str) -> str:
+        try:
+            return datetime.fromisoformat(iso).strftime("%b %d %H:%M")
+        except (ValueError, TypeError):
+            return iso

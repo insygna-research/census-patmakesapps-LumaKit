@@ -72,12 +72,17 @@ def _connect() -> sqlite3.Connection:
             due_at      TEXT,
             next_run_at TEXT,
             workspace_path TEXT,
-            result      TEXT
+            result      TEXT,
+            messages    TEXT NOT NULL DEFAULT '[]'
         )
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "workspace_path" not in columns:
         conn.execute("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
+    # Persistent agent conversation thread (the continuous task session). Lets a
+    # long-running task keep full context across rounds and survive restarts.
+    if "messages" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN messages TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
     return conn
 
@@ -372,9 +377,22 @@ def get_overdue_tasks() -> list[dict]:
     return [_deserialize(dict(r)) for r in rows]
 
 
+def save_session(task_id: int, messages: list, plan: list | None = None,
+                 current_step: int | None = None) -> None:
+    """Persist the task's live agent thread (and optionally its todo list /
+    progress) so a long-running task keeps full context and survives restarts.
+    """
+    fields: dict = {"messages": json.dumps(messages)}
+    if plan is not None:
+        fields["plan"] = json.dumps(plan)
+    if current_step is not None:
+        fields["current_step"] = current_step
+    update_task(task_id, **fields)
+
+
 def _deserialize(row: dict) -> dict:
     """Parse JSON fields back to Python objects."""
-    for field in ("constraints", "plan", "history"):
+    for field in ("constraints", "plan", "history", "messages"):
         if isinstance(row.get(field), str):
             try:
                 row[field] = json.loads(row[field])
