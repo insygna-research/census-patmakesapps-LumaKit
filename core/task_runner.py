@@ -529,18 +529,37 @@ class TaskRunner:
             task["constraints"] = new
 
     def _apply_todos(self, task_id: int, inputs: dict) -> dict:
-        raw = inputs.get("todos") or inputs.get("items") or []
+        raw = inputs.get("todos")
+        if raw is None:
+            raw = inputs.get("items") or []
+        # Models sometimes pass the array as a JSON *string* rather than a real
+        # array. Without this, `for item in raw` would iterate the string one
+        # CHARACTER at a time and create a todo per letter. Coerce it back.
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                raw = []
+        if isinstance(raw, dict):
+            raw = raw.get("todos") or raw.get("items") or [raw]
+        if not isinstance(raw, list):
+            raw = []
+
         todos: list[dict] = []
         for item in raw:
             if isinstance(item, dict):
                 desc = str(item.get("description") or item.get("text") or "").strip()
                 status = str(item.get("status") or "pending").strip().lower()
+            elif isinstance(item, str):
+                desc, status = item.strip(), "pending"
             else:
-                desc, status = str(item).strip(), "pending"
+                continue
             if status not in {"pending", "in_progress", "done"}:
                 status = "pending"
             if desc:
                 todos.append({"description": desc, "status": status})
+            if len(todos) >= 40:  # sane cap — guards against pathological input
+                break
         done = sum(1 for t in todos if t["status"] == "done")
         task_store.update_task(task_id, plan=json.dumps(todos), current_step=done)
         task_store.append_history(task_id, {
