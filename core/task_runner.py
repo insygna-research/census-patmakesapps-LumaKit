@@ -114,9 +114,17 @@ class TaskRunner:
     MAX_ROUNDS_PER_DRIVE = 50
     # Wall-clock budget (seconds) a single task may hold the runner per tick.
     TASK_TICK_BUDGET_SECONDS = 600
-    # How many times to nudge a model that produced prose but no tool call
-    # before treating it as finished.
-    MAX_NUDGES = 1
+    # How many times, within one drive, to re-anchor a model that stopped
+    # calling tools before yielding to a fresh drive.
+    MAX_NUDGES = 2
+    # How many stuck cycles (model keeps going silent with work still open)
+    # across drives before we stop and report the task as failed — honestly,
+    # rather than falsely "done".
+    MAX_STUCK_CYCLES = 4
+    # Tool results bigger than this (serialized) are trimmed before going into
+    # the persistent thread, so big CSV/dir/diff dumps don't bloat context and
+    # make the model choke (which shows up as empty responses).
+    MAX_TOOL_RESULT_CHARS = 3000
     # How many real external waits a task may take before we treat it as stuck.
     MAX_WAITS = 60
     MIN_WAIT_MINUTES = 1
@@ -321,26 +329,49 @@ class TaskRunner:
 
             if not tool_calls:
                 text = (message.get("content") or "").strip()
-                if nudges >= self.MAX_NUDGES:
-                    # The model is talking, not acting, and we've already nudged.
-                    # Treat its last message as the result and wrap up.
-                    self._emit(task_id, "answer", detail=text[:200])
+                todos = task.get("plan") or []
+                incomplete = [t for t in todos if str(t.get("status")) != "done"]
+                # Completion requires an explicit finish_task (handled above) OR an
+                # empty todo list. Trailing off with items still open is NOT done —
+                # the model going silent (often an empty response when context gets
+                # heavy) must never be mistaken for finishing the work.
+                if not incomplete:
+                    self._emit(task_id, "answer", detail=(text or "done")[:200])
                     task_store.save_session(task_id, messages)
-                    self._finalize(task, "done", text or "Task finished.")
+                    self._finalize(task, "done", text or self._generate_report(task, "done"))
                     return
+
+                if nudges >= self.MAX_NUDGES:
+                    # Still stuck this drive. Don't lie about completion and don't
+                    # spin: yield so a fresh drive retries next tick. Give up
+                    # honestly only after repeated stuck cycles.
+                    stuck = self._bump_stuck(task_id, task)
+                    task_store.save_session(task_id, messages)
+                    if stuck >= self.MAX_STUCK_CYCLES:
+                        remaining = "; ".join(t.get("description", "") for t in incomplete)
+                        report = self._generate_report(task, "failed")
+                        self._finalize(task, "failed", f"{report}\n\nNot completed: {remaining}")
+                    else:
+                        task_store.update_task(task_id, next_run_at=datetime.now().isoformat())
+                    return
+
                 nudges += 1
+                remaining = "; ".join(t.get("description", "") for t in incomplete[:5])
                 messages.append({
                     "role": "user",
                     "content": (
-                        "If the goal is fully complete, call finish_task with your "
-                        "report. If not, keep going — use your tools to make progress. "
-                        "Don't just describe what you would do; do it."
+                        f"You are NOT done — your todo list still has open items: {remaining}. "
+                        "Do the next one now with your tools: write the actual files (e.g. the "
+                        "landing page HTML/CSS), run/verify them, then mark the item done. When "
+                        "everything is truly complete and verified, call finish_task. Don't stop "
+                        "and don't just describe what you'd do — do it."
                     ),
                 })
                 task_store.save_session(task_id, messages)
                 continue
 
             nudges = 0
+            self._clear_stuck(task_id, task)
             control = None
             for tc in tool_calls:
                 fn = tc.get("function", {})
@@ -398,7 +429,7 @@ class TaskRunner:
                     self._emit(task_id, "tool_error", tool=name or "?",
                                detail=str(result.get("error") or "")[:200])
                 messages.append({
-                    "role": "tool", "name": name, "content": json.dumps(result, default=str),
+                    "role": "tool", "name": name, "content": self._tool_content_for_thread(result),
                 })
 
             task_store.save_session(task_id, messages)
@@ -443,6 +474,59 @@ class TaskRunner:
         result = registry.execute(name, inputs)
         self._update_code_index_after_tool(name, inputs, result)
         return result
+
+    def _tool_content_for_thread(self, result: dict) -> str:
+        """Serialize a tool result for the persistent thread, trimming oversized
+        payloads so big CSV/dir/diff dumps don't bloat context and choke the
+        model. Keeps the parts the agent actually needs to reason about."""
+        try:
+            full = json.dumps(result, default=str)
+        except Exception:
+            return json.dumps({"success": bool(isinstance(result, dict) and result.get("success", True))})
+        if len(full) <= self.MAX_TOOL_RESULT_CHARS:
+            return full
+
+        trimmed: dict = {"success": result.get("success", True) if isinstance(result, dict) else True,
+                         "truncated": True}
+        if isinstance(result, dict) and result.get("error"):
+            trimmed["error"] = str(result["error"])[:600]
+        data = result.get("data") if isinstance(result, dict) else None
+        if isinstance(data, dict):
+            small: dict = {}
+            for k in ("path", "count", "created", "deleted", "bytes_written",
+                      "replacements", "cwd", "returncode", "success"):
+                if k in data:
+                    small[k] = data[k]
+            for k in ("stdout", "stderr", "content", "diff"):
+                v = data.get(k)
+                if isinstance(v, str):
+                    small[k] = v if len(v) <= 1500 else v[:1500] + "\n...[truncated]"
+            entries = data.get("entries")
+            if isinstance(entries, list):
+                small["entries"] = entries[:30]
+                if len(entries) > 30:
+                    small["entries_truncated"] = len(entries) - 30
+            trimmed["data"] = small
+        elif data is not None:
+            trimmed["data_preview"] = str(data)[:1500]
+        out = json.dumps(trimmed, default=str)
+        return out if len(out) <= self.MAX_TOOL_RESULT_CHARS else out[:self.MAX_TOOL_RESULT_CHARS]
+
+    def _bump_stuck(self, task_id: int, task: dict) -> int:
+        constraints = dict(task.get("constraints") or {})
+        n = int(constraints.get("_stuck_count", 0)) + 1
+        constraints["_stuck_count"] = n
+        task_store.update_task(task_id, constraints=json.dumps(constraints))
+        task["constraints"] = constraints
+        return n
+
+    def _clear_stuck(self, task_id: int, task: dict) -> None:
+        constraints = task.get("constraints") or {}
+        if constraints.get("_stuck_count"):
+            new = dict(constraints)
+            new.pop("_stuck_count", None)
+            task_store.update_task(task_id, constraints=json.dumps(new))
+            task["constraints"] = new
 
     def _apply_todos(self, task_id: int, inputs: dict) -> dict:
         raw = inputs.get("todos") or inputs.get("items") or []
