@@ -70,8 +70,8 @@ If you want the 30-second version:
 git clone https://github.com/patmakesapps/LumaKit.git
 cd LumaKit
 pip install -r requirements.txt
-playwright install chromium
-pip install -e .
+pip install -e ".[all]"        # or plain `pip install -e .` for the core-only install
+playwright install chromium    # only needed for browser automation
 cp .env.example .env
 lumakit open
 ```
@@ -124,8 +124,16 @@ Requirements:
 Install dependencies:
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+pip install -r requirements.txt      # core: web UI + agent + all four providers
+```
+
+Optional stacks (skip what you don't need — the agent degrades gracefully):
+
+```bash
+pip install -e ".[browser]"          # browser automation (then: playwright install chromium)
+pip install -e ".[desktop]"          # desktop screenshots + clipboard tools
+pip install -e ".[speech]"           # Telegram voice replies
+pip install -e ".[all]"              # everything
 ```
 
 Install the local CLI:

@@ -5,11 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lumakit"
 version = "0.1.0"
-description = "Local-first AI agent with web and Telegram surfaces"
+description = "Self-hosted autonomous task agent — bring Claude, GPT, Grok, or local Ollama"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+browser = ["playwright==1.59.0"]
+desktop = ["PyAutoGUI==0.9.54", "pyperclip==1.11.0"]
+speech = ["edge-tts==7.2.8"]
+all = [
+    "playwright==1.59.0",
+    "PyAutoGUI==0.9.54",
+    "pyperclip==1.11.0",
+    "edge-tts==7.2.8",
+]
 
 [project.urls]
 Homepage = "https://github.com/patmakesapps/LumaKit"

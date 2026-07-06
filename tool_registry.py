@@ -210,7 +210,15 @@ class ToolRegistry:
                 continue
 
             import_path = ".".join(module_path.with_suffix('').relative_to(search_root).parts)
-            module = importlib.import_module(import_path)
+            try:
+                module = importlib.import_module(import_path)
+            except ImportError as exc:
+                # Optional stacks (playwright, pyautogui, pyperclip, ...) may
+                # not be installed on a core install — skip those tools and
+                # keep the rest of the agent working.
+                from core import log
+                log.warn("tools", f"skipping {import_path}: missing dependency", exc)
+                continue
 
             for attr_name in dir(module):
                 if attr_name.startswith('get_') and attr_name.endswith('_tool'):

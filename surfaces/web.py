@@ -26,7 +26,7 @@ if _user_env.exists():
 load_dotenv()
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -225,6 +225,102 @@ async def index():
     return FileResponse(WEB_DIR / "index.html")
 
 
+# ---------------------------------------------------------------------------
+# Shareable task artifact page (§6.3) — read-only result + timeline. Token
+# gated like the API (the middleware only covers /api/*, so check here).
+# ---------------------------------------------------------------------------
+
+_TASK_PAGE_STATUS_COLORS = {
+    "planning": "#8b8fa3", "active": "#2f6feb", "blocked": "#c9822b",
+    "paused": "#8b8fa3", "done": "#2e9e5b", "failed": "#c94f4f",
+    "cancelled": "#8b8fa3",
+}
+
+
+@app.get("/task/{task_id}")
+async def task_page(task_id: int, request: Request):
+    import html as _html
+
+    token = request.query_params.get("token") or request.headers.get("x-lumakit-token")
+    if not web_auth.is_valid_token(token):
+        return HTMLResponse("<h1>401</h1><p>This task page requires the session token.</p>",
+                            status_code=401)
+    task = task_store.get_task(task_id)
+    if not task:
+        return HTMLResponse("<h1>404</h1><p>Task not found.</p>", status_code=404)
+
+    esc = _html.escape
+    status = str(task.get("status") or "unknown")
+    color = _TASK_PAGE_STATUS_COLORS.get(status, "#8b8fa3")
+
+    todos_html = ""
+    for todo in task.get("plan") or []:
+        mark = "✅" if todo.get("status") == "done" else ("🔄" if todo.get("status") == "in_progress" else "⬜")
+        todos_html += f"<li>{mark} {esc(str(todo.get('description', '')))}</li>"
+
+    pending = None
+    constraints = task.get("constraints") or {}
+    if isinstance(constraints, dict):
+        pending = constraints.get("_pending_approval")
+    pending_html = ""
+    if isinstance(pending, dict):
+        pending_html = (
+            '<div class="callout">⏸ Waiting for owner approval to run '
+            f"<code>{esc(str(pending.get('tool')))}</code>: "
+            f"<code>{esc(str(pending.get('summary')))}</code></div>"
+        )
+
+    rows = ""
+    for entry in (task.get("history") or [])[-120:]:
+        kind = esc(str(entry.get("type") or entry.get("kind") or ""))
+        detail = entry.get("detail") or entry.get("reason") or entry.get("tool") or ""
+        stamp = esc(str(entry.get("timestamp") or ""))[:19].replace("T", " ")
+        rows += (
+            f"<tr><td class='ts'>{stamp}</td><td class='kind'>{kind}</td>"
+            f"<td>{esc(str(detail))[:300]}</td></tr>"
+        )
+
+    result_html = ""
+    if task.get("result"):
+        result_html = f"<h2>Result</h2><pre class='result'>{esc(str(task['result']))}</pre>"
+
+    body = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LumaKit — Task #{task_id}</title>
+<style>
+ body {{ font-family: system-ui, sans-serif; margin: 0; background: #101216; color: #e8eaf0; }}
+ .wrap {{ max-width: 860px; margin: 0 auto; padding: 32px 20px 60px; }}
+ h1 {{ font-size: 1.4rem; margin: 0 0 4px; }}
+ .status {{ display: inline-block; padding: 2px 10px; border-radius: 999px;
+            background: {color}; color: #fff; font-size: .8rem; margin-left: 8px;
+            vertical-align: middle; }}
+ .muted {{ color: #9aa0b4; font-size: .9rem; }}
+ .callout {{ background: #2a2313; border: 1px solid #c9822b; border-radius: 8px;
+             padding: 12px 14px; margin: 16px 0; }}
+ pre.result {{ background: #171a21; border: 1px solid #262b36; border-radius: 8px;
+               padding: 14px; white-space: pre-wrap; word-break: break-word; }}
+ ul.todos {{ list-style: none; padding-left: 0; }}
+ ul.todos li {{ padding: 3px 0; }}
+ table {{ width: 100%; border-collapse: collapse; font-size: .85rem; }}
+ td {{ padding: 5px 8px; border-top: 1px solid #22262f; vertical-align: top; }}
+ td.ts {{ white-space: nowrap; color: #9aa0b4; }}
+ td.kind {{ white-space: nowrap; color: #7aa2f7; }}
+ code {{ background: #171a21; padding: 1px 5px; border-radius: 4px; }}
+ h2 {{ font-size: 1.05rem; margin-top: 28px; }}
+</style></head><body><div class="wrap">
+<h1>{esc(str(task.get('title') or 'Task'))}<span class="status">{esc(status)}</span></h1>
+<div class="muted">Task #{task_id} · created {esc(str(task.get('created_at') or ''))[:19].replace('T', ' ')}
+ · workspace {esc(str(task.get('workspace_path') or 'default'))}</div>
+<h2>Goal</h2><pre class="result">{esc(str(task.get('goal') or ''))}</pre>
+{pending_html}
+{result_html}
+<h2>Todo list</h2><ul class="todos">{todos_html or '<li class="muted">No todo list yet.</li>'}</ul>
+<h2>Activity timeline</h2>
+<table>{rows or '<tr><td class="muted">No activity recorded yet.</td></tr>'}</table>
+</div></body></html>"""
+    return HTMLResponse(body)
+
+
 # Mount static files after explicit routes so /api paths aren't shadowed
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
@@ -278,8 +374,13 @@ def _settings_payload():
     provider = resolve_provider_name()
     return {
         "llm_provider": provider,
-        # Never echo the key itself — only whether one is configured.
+        # Never echo keys — only whether one is configured, per provider, so
+        # the UI can tell "key already in .env" apart from "key needed" while
+        # the user is switching the dropdown.
         "api_key_set": api_key_is_set(provider),
+        "api_keys_set": {
+            p: api_key_is_set(p) for p in ("anthropic", "openai", "xai")
+        },
         "model": effective.get("primary_model", ""),
         "fallback_model": effective.get("fallback_model", ""),
         "model_source": primary_source,
@@ -433,6 +534,24 @@ async def api_cancel_task(task_id: int):
         return JSONResponse(
             {"error": "task is already in a terminal state"}, status_code=400
         )
+    return task_store.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/approve")
+async def api_approve_task(task_id: int):
+    from core import task_approvals
+    ok, message = task_approvals.approve(task_id)
+    if not ok:
+        return JSONResponse({"error": message}, status_code=400)
+    return task_store.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/deny")
+async def api_deny_task(task_id: int):
+    from core import task_approvals
+    ok, message = task_approvals.deny(task_id)
+    if not ok:
+        return JSONResponse({"error": message}, status_code=400)
     return task_store.get_task(task_id)
 
 
@@ -842,7 +961,7 @@ def _make_agent(ws_id: int, send_fn):
                 _ws_tool_ctx.pop(ws_id, None)
                 return
             if (
-                tool_name in {"send_photo_user", "screenshot_user"}
+                tool_name in {"send_photo", "screenshot"}
                 and data.get("sent")
                 and data.get("interface") == "web"
                 and data.get("url")

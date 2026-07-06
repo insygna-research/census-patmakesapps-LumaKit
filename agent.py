@@ -823,9 +823,21 @@ class Agent:
         self.messages.append(timestamp_message({"role": "assistant", "content": stop_msg}))
         return {"message": {"role": "assistant", "content": stop_msg}}
 
-    def ask_llm(self, prompt):
+    def ask_llm(self, prompt, image_data=None, image_path=None):
+        """Run one user turn through the tool loop.
+
+        Text and image turns share this single code path (D-5): an image turn
+        attaches the picture to the user message and runs without tools (the
+        historical vision behavior — single-shot answer), but gets the same
+        interrupt handling, watchdog, wall-clock guard, and error handling as
+        every other turn.
+        """
+        has_image = bool(image_data or image_path)
         with use_display(self.display), interrupt_context(self._check_interrupt, self._request_interrupt):
-            self.run_controller.start_run(prompt, kind="chat")
+            self.run_controller.start_run(
+                prompt or ("Image analysis" if has_image else ""),
+                kind="vision" if has_image else "chat",
+            )
             watchdog = StallWatchdog(
                 self.run_controller,
                 notify=lambda text: self.display.status(text),
@@ -842,7 +854,34 @@ class Agent:
                 return response
 
             try:
-                self.messages.append(timestamp_message({"role": "user", "content": prompt}))
+                if image_path:
+                    path = Path(image_path)
+                    if not path.exists():
+                        msg = f"File not found: {image_path}"
+                        return _finish({"message": {"role": "assistant", "content": msg}},
+                                       state="failed", error=msg)
+                    if path.suffix.lower() not in self.SUPPORTED_IMAGE_EXTS:
+                        msg = (
+                            f"Unsupported image format: {path.suffix}\n"
+                            f"Supported: {', '.join(sorted(self.SUPPORTED_IMAGE_EXTS))}"
+                        )
+                        return _finish({"message": {"role": "assistant", "content": msg}},
+                                       state="failed", error=msg)
+                    image_data = path.read_bytes()
+                if has_image and not image_data:
+                    msg = "No image provided."
+                    return _finish({"message": {"role": "assistant", "content": msg}},
+                                   state="failed", error=msg)
+
+                user_message = {"role": "user", "content": prompt}
+                if image_data:
+                    prompt = prompt or "What do you see in this image?"
+                    user_message = {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [base64.b64encode(image_data).decode("utf-8")],
+                    }
+                self.messages.append(timestamp_message(user_message))
                 self._compact_tool_history()
                 self._trim_history()
 
@@ -850,7 +889,9 @@ class Agent:
                 self.interrupt_requested = False
                 self.last_model_used = None
 
-                tools = self.get_tools_for_llm()
+                # Image turns keep the historical no-tools behavior — several
+                # local vision models misbehave when tools are attached.
+                tools = None if image_data else self.get_tools_for_llm()
                 start_time = time.monotonic()
                 self._reset_attempt_ledger()
 
@@ -881,54 +922,23 @@ class Agent:
                     spinner_msg = "Lumi is thinking" if round_num == 0 else "Lumi is working"
                     spinner = Spinner(spinner_msg).start() if self.enable_spinner else None
                     self.run_controller.mark_model_round_start(round_num)
-                    stream_state = {
-                        "active": False,
-                        "text": "",
-                    }
 
-                    def _on_stream_chunk(chunk: str) -> None:
-                        if not chunk:
-                            return
-                        stream_state["text"] += chunk
-                        try:
-                            displayed = self.display.stream_delta(chunk)
-                        except Exception:
-                            displayed = False
-                        if displayed is not False:
-                            stream_state["active"] = True
-
-                    def _cancel_stream_silently() -> None:
-                        if not stream_state["active"]:
-                            return
-                        try:
-                            self.display.stream_cancel()
-                        except Exception:
-                            pass
-                        stream_state["active"] = False
-
-                    def _cancel_stream_if_active() -> None:
-                        if not stream_state["active"]:
-                            return
-                        _cancel_stream_silently()
-                        stream_state["active"] = False
-
+                    # Tool-capable rounds are buffered (no token streaming):
+                    # streaming + tools is unreliable on several backends and
+                    # fallback after a partial stream duplicates user-visible
+                    # text. The half-wired streaming machinery was removed
+                    # (D-4); reintroduce it deliberately if it comes back.
                     try:
                         remaining = self.ASK_LLM_TIMEOUT - (time.monotonic() - start_time)
                         deadline = min(self.ROUND_DEADLINE, remaining)
-                        # Keep tool-capable rounds buffered for now. Some Ollama
-                        # backends are less reliable when streaming and tools are
-                        # combined, and fallback after a partial stream can create
-                        # duplicate user-visible text.
-                        stream_this_round = False
                         response = self.ollama.chat(
                             model=self.model,
                             messages=self.messages,
                             tools=tools,
-                            stream=stream_this_round,
+                            stream=False,
                             deadline=deadline,
                             check_interrupt=self._check_interrupt,
                             priority="foreground",
-                            on_chunk=_on_stream_chunk if stream_this_round else None,
                         )
                         self.last_model_used = self.ollama.last_model_used
                         self.run_controller.mark_model_round_end(round_num)
@@ -936,13 +946,11 @@ class Agent:
                         self.run_controller.mark_model_round_end(round_num)
                         if spinner:
                             spinner.stop()
-                        _cancel_stream_if_active()
                         return self._interrupt_response()
                     except OllamaConnectionError as e:
                         self.run_controller.mark_model_round_end(round_num)
                         if spinner:
                             spinner.stop()
-                        _cancel_stream_silently()
                         msg = str(e)
                         if self.ollama.last_model_used and self.ollama.last_model_used != self.model:
                             msg = f"Primary model unavailable, using fallback ({self.ollama.last_model_used}). " + msg
@@ -957,8 +965,28 @@ class Agent:
                         self.run_controller.mark_model_round_end(round_num)
                         if spinner:
                             spinner.stop()
-                        _cancel_stream_silently()
-                        msg = "Ollama stopped responding. Please check that the model is running and try again."
+                        msg = "The model stopped responding. Please check that it is available and try again."
+                        self.display.status(msg)
+                        self.messages.append(timestamp_message({"role": "assistant", "content": msg}))
+                        return _finish(
+                            {"message": {"role": "assistant", "content": msg}},
+                            state="failed",
+                            error=msg,
+                        )
+                    except Exception as e:
+                        self.run_controller.mark_model_round_end(round_num)
+                        if spinner:
+                            spinner.stop()
+                        error_str = str(e)
+                        if image_data and (
+                            "does not support" in error_str.lower() or "vision" in error_str.lower()
+                        ):
+                            msg = (
+                                f"The current model ({self.model}) doesn't support image "
+                                "analysis. Try switching to a vision-capable model."
+                            )
+                        else:
+                            msg = f"Error from the model: {error_str}"
                         self.display.status(msg)
                         self.messages.append(timestamp_message({"role": "assistant", "content": msg}))
                         return _finish(
@@ -998,8 +1026,6 @@ class Agent:
                         (tc.get("function", {}) or {}).get("name") == "react_to_message"
                         for tc in tool_calls
                     )
-                    if tool_calls and stream_state["active"]:
-                        _cancel_stream_if_active()
                     if mid_text and tool_calls and not reactions_only_preview:
                         self.display.status(mid_text)
 
@@ -1008,12 +1034,6 @@ class Agent:
                             message,
                             failed=False,
                         )
-                        if stream_state["active"]:
-                            try:
-                                self.display.stream_end(final_text)
-                            except Exception:
-                                pass
-                            response["streamed"] = True
                         return _finish(response, final_message=final_text)
 
                     # If every tool call in this round is a side-effect-only
@@ -1150,117 +1170,8 @@ class Agent:
     SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
     def ask_llm_with_image(self, prompt, image_data=None, image_path=None):
-        """Send a message with an image to the LLM.
-
-        Args:
-            prompt: Text prompt to accompany the image.
-            image_data: Raw image bytes (e.g. from Telegram download).
-            image_path: Path to an image file on disk.
-        """
-        with use_display(self.display), interrupt_context(self._check_interrupt, self._request_interrupt):
-            self.run_controller.start_run(prompt or "Image analysis", kind="vision")
-            if image_path:
-                path = Path(image_path)
-                if not path.exists():
-                    self.run_controller.finish_run(
-                        "failed", error=f"File not found: {image_path}"
-                    )
-                    return {"message": {"role": "assistant",
-                                        "content": f"File not found: {image_path}"}}
-                if path.suffix.lower() not in self.SUPPORTED_IMAGE_EXTS:
-                    error_msg = (
-                        f"Unsupported image format: {path.suffix}\n"
-                        f"Supported: {', '.join(sorted(self.SUPPORTED_IMAGE_EXTS))}"
-                    )
-                    self.run_controller.finish_run("failed", error=error_msg)
-                    return {"message": {"role": "assistant",
-                                        "content": error_msg}}
-                image_data = path.read_bytes()
-
-            if not image_data:
-                self.run_controller.finish_run("failed", error="No image provided.")
-                return {"message": {"role": "assistant",
-                                    "content": "No image provided."}}
-
-            b64 = base64.b64encode(image_data).decode("utf-8")
-            prompt = prompt or "What do you see in this image?"
-
-            # Clear any stale interrupt from a previous run
-            self.interrupt_requested = False
-
-            # Ollama vision format: message with "images" field
-            self.messages.append(timestamp_message({
-                "role": "user",
-                "content": prompt,
-                "images": [b64],
-            }))
-            self._compact_tool_history()
-            self._trim_history()
-
-            spinner = Spinner("Lumi is looking at the image").start() if self.enable_spinner else None
-            self.run_controller.mark_model_round_start(0)
-            try:
-                remaining = self.ASK_LLM_TIMEOUT
-                deadline = min(self.ROUND_DEADLINE, remaining)
-                response = self.ollama.chat(
-                    model=self.model,
-                    messages=self.messages,
-                    stream=False,
-                    deadline=deadline,
-                    check_interrupt=self._check_interrupt,
-                    priority="foreground",
-                )
-                self.run_controller.mark_model_round_end(0)
-            except OllamaInterruptedError:
-                self.run_controller.mark_model_round_end(0)
-                if spinner:
-                    spinner.stop()
-                return self._interrupt_response()
-            except OllamaConnectionError as e:
-                self.run_controller.mark_model_round_end(0)
-                if spinner:
-                    spinner.stop()
-                msg = str(e)
-                self.messages.append(timestamp_message({"role": "assistant", "content": msg}))
-                self.run_controller.finish_run("failed", error=msg)
-                return {"message": {"role": "assistant", "content": msg}}
-            except OllamaTimeoutError:
-                self.run_controller.mark_model_round_end(0)
-                if spinner:
-                    spinner.stop()
-                msg = "Ollama stopped responding while processing the image."
-                self.messages.append(timestamp_message({"role": "assistant", "content": msg}))
-                self.run_controller.finish_run("failed", error=msg)
-                return {"message": {"role": "assistant", "content": msg}}
-            except Exception as e:
-                self.run_controller.mark_model_round_end(0)
-                if spinner:
-                    spinner.stop()
-                error_str = str(e)
-                # Detect vision-not-supported errors from Ollama
-                if "does not support" in error_str.lower() or "vision" in error_str.lower():
-                    msg = (f"The current model ({self.model}) doesn't support image analysis. "
-                           f"Try switching to a vision model like llava or moondream.")
-                else:
-                    msg = f"Error processing image: {error_str}"
-                self.messages.append(timestamp_message({"role": "assistant", "content": msg}))
-                self.run_controller.finish_run("failed", error=msg)
-                return {"message": {"role": "assistant", "content": msg}}
-            finally:
-                if spinner:
-                    spinner.stop()
-
-            # Notify if fallback was used
-            if self.ollama.last_model_used and self.ollama.last_model_used != self.model:
-                print(_c(DIM, f"  (primary model unavailable, using fallback: {self.ollama.last_model_used})"))
-
-            message = response.get("message", {})
-            self.messages.append(timestamp_message(message))
-            final_text = self._ensure_final_message_content(message, failed=False)
-            self.run_controller.finish_run(
-                "completed", final_message=final_text
-            )
-            return response
+        """Back-compat wrapper — image turns share the ask_llm loop (D-5)."""
+        return self.ask_llm(prompt, image_data=image_data, image_path=image_path)
 
     def run_task(self, task_description):
         print(f"\n=== Task: {task_description} ===")

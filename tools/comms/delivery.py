@@ -59,6 +59,46 @@ def deliver_image_to_current_user(path: Path, caption: str = "") -> dict:
     return _send_image_to_telegram(path, caption=caption)
 
 
+def deliver_text_to_current_user(message: str) -> dict:
+    """Route a standalone text message to the user's active surface."""
+    interface = get_interface() or "telegram"
+    if interface == "web":
+        from core import notifications as notification_log
+        from core.identity import WEB_USER_ID
+
+        user_id = get_interface_user() or WEB_USER_ID
+        notification_id = notification_log.log(message, user_id=str(user_id))
+        return {
+            "sent": True,
+            "interface": "web",
+            "notification_id": notification_id,
+            "message": message,
+        }
+    return _send_text_to_telegram(message)
+
+
+def _send_text_to_telegram(message: str) -> dict:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return {"error": "TELEGRAM_BOT_TOKEN not set in .env"}
+    chat_id = _telegram_chat_id()
+    if not chat_id:
+        return {"error": "No Telegram recipient available"}
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message},
+            timeout=15,
+        )
+        payload = response.json()
+        if payload.get("ok"):
+            return {"sent": True, "interface": "telegram", "message": message, "chat_id": chat_id}
+        return {"error": payload.get("description", "Unknown Telegram error")}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def capture_screenshot_to_disk() -> Path:
     try:
         import pyautogui

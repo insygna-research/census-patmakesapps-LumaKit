@@ -89,16 +89,15 @@ def _surface_instructions(surface):
     if surface == "web":
         return (
             "The user is currently talking to you in the web UI. When they ask to see an "
-            "image or screenshot in this conversation, prefer send_photo_user or "
-            "screenshot_user so it appears inline in the web chat. Do not send it to "
-            "Telegram unless they explicitly ask for Telegram."
+            "image or screenshot in this conversation, use send_photo or screenshot — "
+            "delivery is routed automatically and it will appear inline in the web chat."
         )
 
     if surface == "telegram":
         return (
             "The user is currently talking to you in Telegram. When they ask to see an "
-            "image or screenshot in this conversation, prefer send_photo_user or "
-            "screenshot_user so it is delivered back to this Telegram chat."
+            "image or screenshot in this conversation, use send_photo or screenshot — "
+            "delivery is routed automatically back to this Telegram chat."
         )
 
     return ""

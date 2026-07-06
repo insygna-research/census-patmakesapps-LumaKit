@@ -1,18 +1,17 @@
-"""Capture a screenshot and deliver it to the current user."""
+"""Capture a screenshot of the desktop and deliver it to the current user."""
 
 from __future__ import annotations
 
 from tools.comms.delivery import capture_screenshot_to_disk, deliver_image_to_current_user
 
 
-def get_screenshot_user_tool():
+def get_screenshot_tool():
     return {
-        "name": "screenshot_user",
+        "name": "screenshot",
         "description": (
-            "Take a screenshot of the current screen and deliver it to the current user "
-            "in their active interface. In the web UI it appears inline in the chat. In "
-            "Telegram it is sent as a Telegram photo. Prefer this over screenshot_telegram "
-            "when replying to the current user."
+            "Take a screenshot of the current screen and deliver it to the user. "
+            "Routing is automatic: inline in the web chat, or as a Telegram photo. "
+            "Do NOT use this to send an existing image file — use send_photo for that."
         ),
         "inputSchema": {
             "type": "object",
@@ -24,11 +23,11 @@ def get_screenshot_user_tool():
             },
             "required": [],
         },
-        "execute": _screenshot_user,
+        "execute": _screenshot,
     }
 
 
-def _screenshot_user(inputs):
+def _screenshot(inputs):
     caption = inputs.get("caption", "")
     path = capture_screenshot_to_disk()
     result = deliver_image_to_current_user(path, caption=caption)

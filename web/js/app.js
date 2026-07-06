@@ -887,7 +887,7 @@ function restoreRichToolMessage(message) {
     }
 
     if (
-        ['send_photo_user', 'screenshot_user'].includes(message?.name) &&
+        ['send_photo', 'screenshot'].includes(message?.name) &&
         data.sent &&
         data.interface === 'web' &&
         data.url
@@ -900,7 +900,7 @@ function restoreRichToolMessage(message) {
 }
 
 function isInlineToolResult(data) {
-    return !data.error && ['react_to_message', 'send_photo_user', 'screenshot_user'].includes(data.name);
+    return !data.error && ['react_to_message', 'send_photo', 'screenshot'].includes(data.name);
 }
 
 function addToolCard(name, detail, isResult = false, isError = false) {
@@ -1295,6 +1295,24 @@ function renderTaskDetail(task) {
     // Runtime-retry backoff is now tracked on the task (transient model/network
     // outage), so the whole task is waiting to retry — not a single step.
     const constraints = (task.constraints && typeof task.constraints === 'object') ? task.constraints : {};
+
+    // Pending protected-action approval (§6.3) — the task is parked until the
+    // owner approves or denies, here or from Telegram (/approve, /deny).
+    const pendingApproval = (constraints._pending_approval && typeof constraints._pending_approval === 'object')
+        ? constraints._pending_approval
+        : null;
+    const approvalBannerHtml = (!isTerminal && pendingApproval)
+        ? `<div class="task-retry-banner">
+                <div><strong>Approval needed</strong> — Lumi wants to run
+                    <code>${escapeHtml(pendingApproval.tool || '?')}</code>:</div>
+                <div class="task-retry-reason"><code>${escapeHtml(pendingApproval.summary || '')}</code></div>
+                <div class="task-actions-row" style="margin-top:8px">
+                    <button class="task-action-btn task-action-primary" data-action="approve">Approve once</button>
+                    <button class="task-action-btn task-action-secondary" data-action="deny">Deny</button>
+                </div>
+           </div>`
+        : '';
+
     const retryCount = Number(constraints._runtime_retries || 0);
     const retryBannerHtml = (!isTerminal && retryCount > 0)
         ? `<div class="task-retry-banner">
@@ -1332,6 +1350,7 @@ function renderTaskDetail(task) {
 
     $taskPanelBody.innerHTML = `
         <div class="task-actions-row">${actionButtons.join('')}</div>
+        ${approvalBannerHtml}
         ${retryBannerHtml}
         ${waitingBannerHtml}
 
@@ -1508,7 +1527,7 @@ async function handleTaskAction(taskId, action) {
             if (!ok) return;
         }
 
-        if (action === 'pause' || action === 'resume' || action === 'cancel' || action === 'restart') {
+        if (action === 'pause' || action === 'resume' || action === 'cancel' || action === 'restart' || action === 'approve' || action === 'deny') {
             const res = await fetch(`/api/tasks/${taskId}/${action}`, { method: 'POST' });
             if (!res.ok) throw new Error((await res.json()).error || `Failed to ${action}`);
             taskDetailCache = await res.json();
@@ -1688,12 +1707,13 @@ async function loadSettings() {
         const approvalStateLabel = approvalsOn ? 'On' : 'Off';
 
         const provider = settings.llm_provider || 'ollama';
+        const providerKeySet = settings.api_keys_set || {};
         const providerOptions = ['ollama', 'anthropic', 'openai', 'xai']
             .map(p => `<option value="${p}" ${p === provider ? 'selected' : ''}>${{ollama: 'Ollama (local)', anthropic: 'Anthropic (Claude)', openai: 'OpenAI (GPT)', xai: 'xAI (Grok)'}[p]}</option>`)
             .join('');
-        const keyStatus = settings.api_key_set
-            ? '<span class="setting-source-pill">key saved</span>'
-            : (provider === 'ollama' ? '' : '<span class="setting-source-pill">no key set</span>');
+        const keyPlaceholder = (p) => providerKeySet[p]
+            ? 'Key found in your environment — leave blank to use it'
+            : 'Paste your API key';
 
         $settingsContent.innerHTML = `
             ${banner}
@@ -1701,7 +1721,8 @@ async function loadSettings() {
                 <h3>Model Provider</h3>
                 <div class="settings-note">
                     Run on local Ollama (private), or bring an API key for Claude, GPT, or Grok.
-                    The key is stored server-side only and is never shown again. ${keyStatus}
+                    Keys already set in .env are detected automatically; anything you paste here
+                    is stored server-side only and never shown again.
                 </div>
                 <form id="provider-form" class="settings-form">
                     <div class="settings-field">
@@ -1709,8 +1730,8 @@ async function loadSettings() {
                         <select id="provider-select" class="settings-select">${providerOptions}</select>
                     </div>
                     <div class="settings-field" id="api-key-field" ${provider === 'ollama' ? 'style="display:none"' : ''}>
-                        <label for="api-key-input">API Key</label>
-                        <input id="api-key-input" class="settings-input" type="password" value="" placeholder="${settings.api_key_set ? 'Key saved — enter a new key to replace it' : 'Paste your API key'}" autocomplete="off">
+                        <label for="api-key-input">API Key <span id="api-key-status" class="setting-source-pill" ${providerKeySet[provider] ? '' : 'style="display:none"'}>key detected</span></label>
+                        <input id="api-key-input" class="settings-input" type="password" value="" placeholder="${keyPlaceholder(provider)}" autocomplete="off">
                     </div>
                     <div class="settings-actions">
                         <button type="submit" class="settings-btn primary">Save Provider</button>
@@ -1834,8 +1855,16 @@ async function loadSettings() {
         const $apiKeyInput = document.getElementById('api-key-input');
 
         $providerSelect?.addEventListener('change', () => {
+            const p = $providerSelect.value;
             if ($apiKeyField) {
-                $apiKeyField.style.display = $providerSelect.value === 'ollama' ? 'none' : '';
+                $apiKeyField.style.display = p === 'ollama' ? 'none' : '';
+            }
+            if ($apiKeyInput) {
+                $apiKeyInput.placeholder = keyPlaceholder(p);
+            }
+            const $keyStatus = document.getElementById('api-key-status');
+            if ($keyStatus) {
+                $keyStatus.style.display = providerKeySet[p] ? '' : 'none';
             }
         });
 
