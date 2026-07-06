@@ -135,26 +135,60 @@ def _connect(inputs: dict[str, Any]) -> dict[str, Any]:
 def get_struqt_list_projects_tool():
     return {
         "name": "struqt_list_projects",
-        "description": "List Struqt projects that LumaKit can create tasks inside.",
-        "inputSchema": {"type": "object", "properties": {}},
-        "execute": lambda inputs: _request("GET", "/v1/projects"),
+        "description": (
+            "List Struqt projects (paged). Use query to find a project by name, and limit/offset to page "
+            "through large sets. The response includes total, returned, hasMore, and nextOffset."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Case-insensitive substring to match project names."},
+                "workspaceId": {"type": "string", "description": "Only return projects in this workspace id."},
+                "limit": {"type": "integer", "description": "Max results (default 20, max 200)."},
+                "offset": {"type": "integer", "description": "Results to skip for paging; use the response nextOffset for the next page."},
+            },
+        },
+        "execute": lambda inputs: _request(
+            "GET",
+            "/v1/projects",
+            params={
+                "query": inputs.get("query"),
+                "workspaceId": inputs.get("workspaceId"),
+                "limit": inputs.get("limit"),
+                "offset": inputs.get("offset"),
+            },
+        ),
     }
 
 
 def get_struqt_list_tasks_tool():
     return {
         "name": "struqt_list_tasks",
-        "description": "List Struqt tasks/todos, optionally filtered to a project.",
+        "description": (
+            "List Struqt tasks/todos (paged). Filter by projectId and/or workspaceId, search titles with query, "
+            "and page with limit/offset. The response includes total, returned, hasMore, and nextOffset."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "projectId": {
-                    "type": "string",
-                    "description": "Optional Struqt project id to filter tasks.",
-                }
+                "projectId": {"type": "string", "description": "Optional Struqt project id to filter tasks."},
+                "workspaceId": {"type": "string", "description": "Optional workspace id to filter tasks."},
+                "query": {"type": "string", "description": "Case-insensitive substring to match task titles."},
+                "limit": {"type": "integer", "description": "Max results (default 20, max 200)."},
+                "offset": {"type": "integer", "description": "Results to skip for paging; use the response nextOffset for the next page."},
             },
         },
-        "execute": lambda inputs: _request("GET", "/v1/todos", params={"projectId": inputs.get("projectId")}),
+        "execute": lambda inputs: _request(
+            "GET",
+            "/v1/todos",
+            params={
+                "projectId": inputs.get("projectId"),
+                "workspaceId": inputs.get("workspaceId"),
+                "query": inputs.get("query"),
+                "limit": inputs.get("limit"),
+                "offset": inputs.get("offset"),
+            },
+        ),
     }
 
 
@@ -256,3 +290,189 @@ def _update_task(inputs: dict[str, Any]) -> dict[str, Any]:
     todo_id = inputs["todoId"]
     body = {k: v for k, v in inputs.items() if k != "todoId"}
     return _request("PATCH", f"/v1/todos/{todo_id}", json_body=body)
+
+
+def get_struqt_delete_task_tool():
+    return {
+        "name": "struqt_delete_task",
+        "description": "Delete a Struqt task/todo.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"todoId": {"type": "string", "description": "Struqt todo id."}},
+            "required": ["todoId"],
+        },
+        "execute": lambda inputs: _request("DELETE", f"/v1/todos/{inputs['todoId']}"),
+    }
+
+
+def get_struqt_list_workspaces_tool():
+    return {
+        "name": "struqt_list_workspaces",
+        "description": (
+            "List the workspaces the signed-in Struqt user belongs to (id, name, role), paged. "
+            "Use query to find one by name, and limit/offset to page. "
+            "Read-only: agents cannot create, rename, or delete workspaces or manage members. "
+            "Use a workspace id to target struqt_create_group or struqt_create_project at a specific workspace."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Case-insensitive substring to match workspace names."},
+                "limit": {"type": "integer", "description": "Max results (default 20, max 200)."},
+                "offset": {"type": "integer", "description": "Results to skip for paging; use the response nextOffset for the next page."},
+            },
+        },
+        "execute": lambda inputs: _request(
+            "GET",
+            "/v1/workspaces",
+            params={
+                "query": inputs.get("query"),
+                "limit": inputs.get("limit"),
+                "offset": inputs.get("offset"),
+            },
+        ),
+    }
+
+
+def get_struqt_list_groups_tool():
+    return {
+        "name": "struqt_list_groups",
+        "description": (
+            "List Struqt groups (paged). Use query to find a group by name, and limit/offset to page. "
+            "The response includes total, returned, hasMore, and nextOffset."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Case-insensitive substring to match group names."},
+                "workspaceId": {"type": "string", "description": "Only return groups in this workspace id."},
+                "limit": {"type": "integer", "description": "Max results (default 20, max 200)."},
+                "offset": {"type": "integer", "description": "Results to skip for paging; use the response nextOffset for the next page."},
+            },
+        },
+        "execute": lambda inputs: _request(
+            "GET",
+            "/v1/groups",
+            params={
+                "query": inputs.get("query"),
+                "workspaceId": inputs.get("workspaceId"),
+                "limit": inputs.get("limit"),
+                "offset": inputs.get("offset"),
+            },
+        ),
+    }
+
+
+def get_struqt_create_group_tool():
+    return {
+        "name": "struqt_create_group",
+        "description": "Create a Struqt group. Prefer an existing group if one already matches the user's intent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Group name."},
+                "parentGroupId": {
+                    "type": "string",
+                    "description": "Optional parent group id to nest under. Inherits the parent's workspace and scope.",
+                },
+                "workspaceId": {
+                    "type": "string",
+                    "description": "Optional workspace id (from struqt_list_workspaces) to create this group inside. Omit for a personal group. Ignored when parentGroupId is set.",
+                },
+                "storageScope": {
+                    "type": "string",
+                    "enum": ["local", "cloud"],
+                    "description": "Storage scope for personal top-level groups. Defaults to local. Workspace groups are always cloud.",
+                },
+            },
+            "required": ["name"],
+        },
+        "execute": _create_group,
+    }
+
+
+def _create_group(inputs: dict[str, Any]) -> dict[str, Any]:
+    return _request(
+        "POST",
+        "/v1/groups",
+        json_body={
+            "name": inputs["name"],
+            "parentGroupId": inputs.get("parentGroupId"),
+            "workspaceId": inputs.get("workspaceId"),
+            "storageScope": inputs.get("storageScope") or "local",
+            "source": {"app": "lumakit"},
+        },
+    )
+
+
+def get_struqt_update_group_tool():
+    return {
+        "name": "struqt_update_group",
+        "description": "Rename a Struqt group or archive/unarchive it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "groupId": {"type": "string", "description": "Struqt group id."},
+                "name": {"type": "string"},
+                "archived": {"type": "boolean", "description": "true to archive, false to unarchive."},
+            },
+            "required": ["groupId"],
+        },
+        "execute": _update_group,
+    }
+
+
+def _update_group(inputs: dict[str, Any]) -> dict[str, Any]:
+    group_id = inputs["groupId"]
+    body = {k: v for k, v in inputs.items() if k != "groupId"}
+    return _request("PATCH", f"/v1/groups/{group_id}", json_body=body)
+
+
+def get_struqt_delete_group_tool():
+    return {
+        "name": "struqt_delete_group",
+        "description": "Delete a Struqt group. Projects inside it are un-grouped (not deleted), matching the app.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"groupId": {"type": "string", "description": "Struqt group id."}},
+            "required": ["groupId"],
+        },
+        "execute": lambda inputs: _request("DELETE", f"/v1/groups/{inputs['groupId']}"),
+    }
+
+
+def get_struqt_update_project_tool():
+    return {
+        "name": "struqt_update_project",
+        "description": "Rename a Struqt project, move it to a group, or archive/unarchive it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "projectId": {"type": "string", "description": "Struqt project id."},
+                "name": {"type": "string"},
+                "groupId": {"type": "string", "description": "Move to this group id, or empty string to ungroup."},
+                "archived": {"type": "boolean"},
+            },
+            "required": ["projectId"],
+        },
+        "execute": _update_project,
+    }
+
+
+def _update_project(inputs: dict[str, Any]) -> dict[str, Any]:
+    project_id = inputs["projectId"]
+    body = {k: v for k, v in inputs.items() if k != "projectId"}
+    return _request("PATCH", f"/v1/projects/{project_id}", json_body=body)
+
+
+def get_struqt_delete_project_tool():
+    return {
+        "name": "struqt_delete_project",
+        "description": "Delete a Struqt project and all of its tasks.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"projectId": {"type": "string", "description": "Struqt project id."}},
+            "required": ["projectId"],
+        },
+        "execute": lambda inputs: _request("DELETE", f"/v1/projects/{inputs['projectId']}"),
+    }
