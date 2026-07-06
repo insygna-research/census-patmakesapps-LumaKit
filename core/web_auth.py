@@ -60,6 +60,20 @@ def tokenized_url(base_url: str) -> str:
     return f"{base}/?token={get_session_token()}"
 
 
+def task_page_url(task_id: int) -> str:
+    """Tokenized link to the read-only task artifact page (§6.3)."""
+    import json
+
+    port = None
+    try:
+        state = json.loads((get_data_dir() / "lumakit-runtime.json").read_text(encoding="utf-8"))
+        port = state.get("port")
+    except Exception:
+        port = None
+    port = port or int(os.getenv("LUMAKIT_WEB_PORT", "7865") or 7865)
+    return f"http://localhost:{port}/task/{task_id}?token={get_session_token()}"
+
+
 def resolve_bind_host() -> str:
     """Bind host for the web server: loopback unless explicitly overridden."""
     host = str(os.getenv("LUMAKIT_BIND_HOST", "") or "").strip() or "127.0.0.1"

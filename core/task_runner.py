@@ -416,6 +416,31 @@ class TaskRunner:
                     })
                     continue
 
+                # Protected actions pause the task for a cross-surface approval
+                # instead of being flatly refused (§6.3). A one-shot grant from
+                # /approve lets the exact action through once.
+                refusal = autonomous_tool_refusal(name, inputs)
+                if refusal:
+                    from core import task_approvals
+                    if task_approvals.consume_grant(task, name, inputs):
+                        self._emit(task_id, "tool", tool=name or "?",
+                                   detail="running owner-approved action")
+                        refusal = None
+                if refusal:
+                    messages.append({
+                        "role": "tool", "name": name,
+                        "content": json.dumps({
+                            "success": False,
+                            "waiting_for_approval": True,
+                            "detail": (
+                                "This action requires the owner's approval. The "
+                                "task is pausing until they approve or deny it."
+                            ),
+                        }),
+                    })
+                    control = ("approval", name, inputs)
+                    continue
+
                 if name == "update_todos":
                     result = self._apply_todos(task_id, inputs)
                 elif name == "set_workspace":
@@ -462,6 +487,9 @@ class TaskRunner:
             # Checkpoint every N rounds, and always before a state change.
             checkpoint(force=control is not None)
 
+            if control and control[0] == "approval":
+                self._pause_for_approval(task, control[1], control[2])
+                return
             if control and control[0] == "wait":
                 self._schedule_wait(task, control[1], control[2])
                 return
@@ -480,16 +508,10 @@ class TaskRunner:
     # ------------------------------------------------------------------
 
     def _run_tool(self, task_id: int, name: str | None, inputs: dict) -> dict:
+        # Protected-action gating happens in the drive loop (approval pause,
+        # §6.3) before this is called.
         registry = self._get_registry()
         self._emit(task_id, "tool", tool=name or "?", detail=_summarize_tool_args(name, inputs))
-
-        refusal = autonomous_tool_refusal(name, inputs)
-        if refusal:
-            return {
-                "success": False,
-                "error": refusal,
-                "toolName": name,
-            }
         result = registry.execute(name, inputs)
         self._update_code_index_after_tool(name, inputs, result)
         return result
@@ -596,6 +618,27 @@ class TaskRunner:
             )
         print(f"[task-runner] task {task_id} waiting until {resume_at}: {reason}")
 
+    def _pause_for_approval(self, task: dict, tool: str, inputs: dict) -> None:
+        """Block the task on a pending approval and ping the owner (§6.3)."""
+        from core import task_approvals
+        record = task_approvals.request_approval(task, tool, inputs)
+        self._notify(
+            f"Task #{task['id']} '{task['title']}' needs your approval to run "
+            f"{tool}:\n\n    {record['summary']}\n\n"
+            f"Reply /approve {task['id']} to allow it once, or /deny {task['id']} "
+            f"to refuse.\n{self._task_link(task['id'])}",
+            task.get("owner_chat_id"),
+        )
+        print(f"[task-runner] task {task['id']} blocked awaiting approval for {tool}")
+
+    @staticmethod
+    def _task_link(task_id: int) -> str:
+        try:
+            from core.web_auth import task_page_url
+            return f"Details: {task_page_url(task_id)}"
+        except Exception:
+            return ""
+
     def _finalize(self, task: dict, outcome: str, report: str) -> None:
         task_id = task["id"]
         # Clear any transient wait markers from constraints.
@@ -610,18 +653,25 @@ class TaskRunner:
             task_store.update_task(task_id, status="blocked", result=report)
             self._notify(
                 f"Task blocked: {task['title']}\n\n{report}\n\n"
-                "Reply with what you'd like me to do and I'll resume.",
+                "Reply with what you'd like me to do and I'll resume.\n"
+                f"{self._task_link(task_id)}",
                 task.get("owner_chat_id"),
             )
             print(f"[task-runner] task {task_id} blocked")
             return
         if outcome == "failed":
             task_store.fail_task(task_id, report)
-            self._notify(f"Task failed: {task['title']}\n\n{report}", task.get("owner_chat_id"))
+            self._notify(
+                f"Task failed: {task['title']}\n\n{report}\n{self._task_link(task_id)}",
+                task.get("owner_chat_id"),
+            )
             print(f"[task-runner] task {task_id} failed")
             return
         task_store.complete_task(task_id, report)
-        self._notify(f"Task complete: {task['title']}\n\n{report}", task.get("owner_chat_id"))
+        self._notify(
+            f"Task complete: {task['title']}\n\n{report}\n{self._task_link(task_id)}",
+            task.get("owner_chat_id"),
+        )
         print(f"[task-runner] task {task_id} done")
 
     def _parse_wait_request(self, inputs: dict) -> tuple[str, str]:

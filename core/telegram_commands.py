@@ -221,6 +221,8 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             lines.append("/adduser - authorize a new user")
             lines.append("/removeuser - remove an authorized user")
             lines.append("/role - set a user's tool-access role (trusted/limited)")
+            lines.append("/approve <id> - approve a task's pending protected action")
+            lines.append("/deny <id> - refuse a task's pending protected action")
             lines.append("/model - choose the owner's Telegram model settings")
             lines.append("/users - list authorized users")
         lines.append("/personality - view or change your Telegram personality override")
@@ -310,8 +312,22 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         )
         return True
 
-    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role"} and str(chat_id) != str(OWNER_ID):
+    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role", "/approve", "/deny"} and str(chat_id) != str(OWNER_ID):
         send_message("This command is owner-only.")
+        return True
+
+    if cmd in {"/approve", "/deny"} and str(chat_id) == str(OWNER_ID):
+        from core import task_approvals
+        try:
+            task_id = int(str(args or "").strip())
+        except ValueError:
+            send_message(f"Usage: {cmd} <task id>  (see /tasks for ids)")
+            return True
+        if cmd == "/approve":
+            ok, reply = task_approvals.approve(task_id)
+        else:
+            ok, reply = task_approvals.deny(task_id)
+        send_message(("✅ " if ok else "⚠️ ") + reply)
         return True
 
     if cmd == "/model" and str(chat_id) == str(OWNER_ID):
