@@ -22,8 +22,7 @@ def get_get_project_tree_tool():
 
 
 def _execute(inputs):
-    # Local import to avoid a circular import at module load.
-    from agent import _build_project_tree
+    from core.project_tree import build_project_tree as _build_project_tree
 
     max_depth = int(inputs.get('max_depth') or 3)
     root = get_repo_root()

@@ -2,16 +2,19 @@
 
 ![LumaKit Hero](photos/lumakit_hero.png)
 
-**A local-first AI agent for Ollama with a clean web UI, optional Telegram access, and a launcher flow that feels like a real app instead of a dev script.**
+[![CI](https://github.com/patmakesapps/LumaKit/actions/workflows/ci.yml/badge.svg)](https://github.com/patmakesapps/LumaKit/actions/workflows/ci.yml)
 
-LumaKit gives an Ollama-backed model real tools: shell execution, repository work, web search, browser automation, screenshots, email, reminders, memory, and long-running autonomous tasks. The goal is convenience without hiding the runtime. You install Ollama, install LumaKit, run `lumakit open`, and start using it.
+**The self-hosted autonomous task agent you can actually trust with a shell.** Delegate a job from your desk, watch it work in a real UI, approve the risky steps, and get pinged when it's done. Runs on Claude, GPT, Grok — or fully local Ollama when privacy matters.
+
+LumaKit gives a model real tools: shell execution, repository work, web search, browser automation, screenshots, email, reminders, memory, and long-running autonomous tasks that survive restarts. Not another chat assistant — a task agent: you hand Lumi a job, it runs it start to finish, and it reports back.
 
 ## Why this matters
 
-- **Built around Ollama.** The runtime contract is local Ollama first.
-- **Real launcher flow.** `lumakit open` starts or reuses the backend and opens the UI.
-- **Clean desktop experience.** Linux gets an app-menu launcher; Windows gets Desktop and Start Menu shortcuts.
-- **Practical agent features.** Not just chat: tools, memory, tasks, browser sessions, and notifications.
+- **Durable autonomous tasks.** A persistent task runner drives jobs for hours or days, keeps its own todo list, survives restarts, and refuses to fake completion.
+- **Real observability.** A web UI that shows live tool activity, diff previews before writes, approval prompts, and screenshots — you *watch it work*, not just chat with it.
+- **Safe autonomy.** Token-gated server, filesystem sandbox, fail-closed confirmations, and approvals on shell/git/delete that can't be toggled away. See [Security model](#security-model).
+- **Bring any model.** One config switch between Anthropic (Claude), OpenAI (GPT), xAI (Grok), and local Ollama — local stays the privacy option, not a requirement.
+- **Real launcher flow.** `lumakit open` starts or reuses the backend and opens the UI; Linux gets an app-menu launcher, Windows gets Desktop/Start Menu shortcuts.
 
 ## What it looks like
 
@@ -33,25 +36,28 @@ And the launcher story is finally clean enough to hand to normal users:
 
 For the fastest successful first run, do these steps in order:
 
-1. **Install Ollama**
-   LumaKit expects a local Ollama endpoint at `http://localhost:11434`.
-
-2. **Pull or choose a model**
-   LumaKit works best with a strong tool-capable model. If tool use feels weak, the model is usually the limiting factor, not the launcher.
-
-3. **Install LumaKit**
+1. **Install LumaKit**
    Clone the repo, install Python dependencies, install the local CLI, and copy `.env.example` to `.env`.
 
-4. **Set `OLLAMA_MODEL`**
-   Point it at the model you want LumaKit to use for chat/tool loops.
+2. **Pick a model provider**
+   Bring an API key for a hosted model, or run fully local — either works with the same config:
+   ```env
+   # Hosted (best first-run tool quality — no Ollama needed):
+   LLM_PROVIDER="anthropic"        # or "openai" / "xai"
+   LLM_MODEL="claude-opus-4-8"     # or "gpt-5.2" / "grok-4"
+   LLM_API_KEY="your-key-here"
 
-5. **Run LumaKit**
-   Use:
+   # Or fully local/private (requires Ollama at localhost:11434):
+   OLLAMA_MODEL="your-pulled-model"
+   ```
+   You can also pick the provider and paste the key later in the web UI Settings — it's stored server-side and never shown again.
+
+3. **Run LumaKit**
    ```bash
    lumakit open
    ```
 
-If you skip step 4, LumaKit now opens into a first-run setup state and asks you to choose a primary model in the web UI before chatting.
+If you skip step 2, LumaKit opens into a first-run setup state and asks you to choose a provider and model in the web UI before chatting.
 
 If you want step-by-step setup, use the platform guides:
 
@@ -89,34 +95,29 @@ create a Struqt task called "Review launch checklist" in Launch
 
 Note: Struqt is managed by Utility Tech LLC. The Struqt-side release that enables this integration has not shipped publicly yet, but support is planned.
 
-## Recommended first-run model
+## Bring any model
 
-Today, the repo expects you to set your model explicitly via env vars. The main knob is:
+LumaKit speaks to four providers behind one interface — pick with `LLM_PROVIDER`:
 
-```env
-OLLAMA_MODEL="your-model-here"
-```
+| Provider | `LLM_PROVIDER` | Example `LLM_MODEL` | Key variable |
+|---|---|---|---|
+| Anthropic (Claude) | `anthropic` | `claude-opus-4-8` | `LLM_API_KEY` or `ANTHROPIC_API_KEY` |
+| OpenAI (GPT) | `openai` | `gpt-5.2` | `LLM_API_KEY` or `OPENAI_API_KEY` |
+| xAI (Grok) | `xai` | `grok-4` | `LLM_API_KEY` or `XAI_API_KEY` |
+| Ollama (local) | `ollama` (default) | any pulled model | none |
 
-Current shipped behavior:
+How to choose:
 
-- the web UI displays the current configured model
-- the web UI Settings view can persist a primary/fallback model override and list detected Ollama models
-- Telegram owner controls can override the owner's runtime model with `/model`
-
-Recommended positioning for now:
-
-- if you want the strongest first impression, use a strong model for `OLLAMA_MODEL`
-- if your Ollama setup exposes cloud-backed models and you want instant high-quality tool use, you can point `OLLAMA_MODEL` at one of those
-- if you want the fully local/private path, point `OLLAMA_MODEL` at a local model you have pulled
-
-The repo already supports the local/private story cleanly, and the web UI now gives users a first-run model-selection path plus persistent runtime model switching without editing `.env`.
+- **Strongest first impression:** a hosted frontier model (Claude/GPT/Grok) gives instant high-quality tool use with zero local setup.
+- **Fully local/private:** run Ollama and point `OLLAMA_MODEL` at a pulled model — nothing leaves your machine. The old `OLLAMA_*` variables keep working unchanged.
+- **Switch anytime:** the web UI Settings view picks the provider, stores the API key server-side (never echoed back), persists primary/fallback model overrides, and lists detected Ollama models. Telegram owners can still override their runtime model with `/model`.
 
 ## Install
 
 Requirements:
 
 - Python 3.10+
-- [Ollama](https://ollama.com) running locally
+- An API key for Claude/GPT/Grok, **or** [Ollama](https://ollama.com) running locally
 - `ffmpeg` if you want Telegram voice support
 - `playwright install chromium` for browser automation
 
@@ -154,9 +155,20 @@ The essential variables for a normal web-first install are:
 
 | Variable | Purpose |
 |---|---|
-| `OLLAMA_MODEL` | Primary model for chat/tool requests |
-| `OLLAMA_FALLBACK_MODEL` | Optional fallback if the primary is unavailable |
+| `LLM_PROVIDER` | `ollama` (default) \| `anthropic` \| `openai` \| `xai` |
+| `LLM_MODEL` | Primary model for chat/tool requests |
+| `LLM_FALLBACK_MODEL` | Optional fallback if the primary is unavailable |
+| `LLM_API_KEY` | API key for hosted providers |
+| `OLLAMA_MODEL` / `OLLAMA_FALLBACK_MODEL` | Ollama-specific aliases; still fully supported |
 | `LUMAKIT_WEB_PORT` | Optional port override for the web UI |
+
+Security & network (see [Security model](#security-model)):
+
+| Variable | Purpose |
+|---|---|
+| `LUMAKIT_BIND_HOST` | Bind host; defaults to `127.0.0.1` (local-only) |
+| `LUMAKIT_ALLOWED_ORIGINS` | Extra hostnames allowed on WebSocket upgrades when exposed |
+| `LUMAKIT_ALLOW_PATHS` | Opt-in extra directories file tools may touch outside the workspace |
 
 Optional extras:
 
@@ -164,7 +176,7 @@ Optional extras:
 |---|---|
 | `SERPAPI_KEY` | Premium web search |
 | `TELEGRAM_BOT_TOKEN` | Enable Telegram access |
-| `TELEGRAM_ALLOWED_IDS` | Authorize Telegram users; first ID is the owner |
+| `TELEGRAM_ALLOWED_IDS` | Authorize Telegram users; first ID is the owner, others get scoped roles |
 | `OLLAMA_LOCAL_MODEL` | Optional local model the Telegram owner can toggle with `/model local on` |
 | `LUMI_EMAIL_*` | Autonomous Gmail loop |
 | `LUMIKIT_WHISPER_*` / `LUMIKIT_TTS_*` | Telegram voice STT/TTS |
@@ -233,7 +245,8 @@ The web UI can already:
 ## Core features
 
 - **Tool-calling agent** with multi-round tool loops
-- **Autonomous task runner** with persisted state and follow-up notifications
+- **Multi-provider model layer** — Claude, GPT, Grok, or local Ollama behind one interface
+- **Autonomous task runner** with durable persisted state (WAL SQLite, append-only history) and follow-up notifications
 - **Web UI** with chat history, tool activity, approval prompts, tasks, and inline images
 - **Telegram** with multi-user support, reminders, photos, voice, and owner controls
 - **Browser automation** with persistent auth profiles
@@ -241,6 +254,30 @@ The web UI can already:
 - **Autonomous Gmail loop** with owner approval, URL stripping, leak scan, and audit log
 - **Code intelligence** with tree-sitter-backed symbol search and call graph tooling
 - **Surface-aware delivery** for screenshots, images, reminders, and follow-up messages
+
+## Security model
+
+LumaKit gives a model real tools — including a shell — so its security posture is explicit:
+
+- **Local-only by default.** The web server binds `127.0.0.1`. Exposing it to your network is
+  an explicit opt-in (`LUMAKIT_BIND_HOST`), and even then every request still authenticates.
+- **Token-gated API.** A random per-install session token (stored in
+  `~/.lumakit/web_session_token`) is required on every `/api/*` request and WebSocket
+  handshake. `lumakit open` injects it into your browser automatically; anything without it
+  gets a 401. WebSocket upgrades also enforce an Origin allowlist against DNS-rebinding.
+- **Filesystem sandbox.** File tools are contained to the active workspace. Secrets paths
+  (`.env`, `config.env`, `~/.lumakit/**`, `.git/config`) are never readable by tools, even
+  inside the workspace. Power users can widen access with `LUMAKIT_ALLOW_PATHS`.
+- **Approvals that can't be toggled away.** Shell, Python execution, file deletion, and git
+  writes always prompt for approval — even if you turn the general approvals setting off. The
+  confirm flow fails closed: a missing or timed-out confirmation is a denial.
+- **Per-user roles on Telegram.** Only the owner can reach execution/repo-write tools; other
+  authorized users get `trusted` or `limited` roles (managed with `/role`).
+- **Honest tool descriptions.** `execute_python` says exactly what it is: not sandboxed, runs
+  as the local user, always behind approval.
+
+To expose LumaKit beyond localhost, set `LUMAKIT_BIND_HOST`, add your hostnames to
+`LUMAKIT_ALLOWED_ORIGINS`, and treat the session token like a password.
 
 ## Telegram, email, and always-on mode
 
@@ -256,7 +293,9 @@ If you want the full always-available agent experience, these docs matter:
 
 What you can do today:
 
-- set `OLLAMA_MODEL` and `OLLAMA_FALLBACK_MODEL` in `.env`
+- pick a provider (`ollama`/`anthropic`/`openai`/`xai`) via `.env` or the web UI Settings view
+- set `LLM_MODEL`/`LLM_FALLBACK_MODEL` (or the classic `OLLAMA_*` variables for local)
+- paste an API key in Settings — stored server-side only, never echoed back
 - set `OLLAMA_LOCAL_MODEL` as an optional locally-pulled alternative
 - in the web UI Settings view, choose a persisted primary/fallback model override
 - on Telegram, the owner can use `/model` to switch their own runtime preferences
@@ -267,14 +306,15 @@ What is **not** shipped yet:
 
 ## Why this is ready for launch
 
-The repo now has the pieces a normal Ollama user actually needs:
+The repo now has the pieces a real install actually needs:
 
-- a clear install path
+- a clear install path with hosted-key **or** fully-local first run
 - Linux and Windows quick-start guides
-- launcher commands that behave like a real app
-- shortcuts that make LumaKit easy to reopen
-- a first-run model-selection flow instead of a dead-end
-- runtime model switching in the web UI without hand-editing `.env`
+- launcher commands that behave like a real app, plus reopenable shortcuts
+- a first-run provider/model-selection flow instead of a dead-end
+- a hardened security posture: token-gated server, filesystem sandbox, fail-closed approvals
+- a durable task runner backed by WAL SQLite and append-only history
+- a test suite and CI on every push
 
 ## Documentation map
 
@@ -300,20 +340,22 @@ Lumalok stores the local API token at `~/.lumalok/integration.json`. Secret valu
 ## Project structure
 
 ```text
-agent.py              Core Lumi agent loop, prompts, tool rounds, and Ollama calls
-ollama_client.py      Ollama HTTP client, fallback handling, and generation scheduling
+agent.py              Core Lumi agent loop, prompts, tool rounds, and model calls
+ollama_client.py      Native Ollama client with local generation scheduling
 lumakit.py            Launcher/service entrypoint
-tool_registry.py      Central tool registration and dispatch helpers
+tool_registry.py      Central tool registration, validation, and dispatch
 lumakit.service.example
                       Example systemd unit for always-on Linux installs
 surfaces/             User interfaces: web, Telegram, and CLI
-core/                 Shared runtime services, storage, auth, tasks, reminders, email, Telegram I/O
+core/                 Shared runtime services: providers, auth, tasks, storage, approvals
+core/providers/       Model provider adapters (Ollama, Anthropic, OpenAI, xAI)
 tools/                Tool registry modules grouped by repo, runtime, web, memory, and comms
+tests/                Pytest suite (security policy, sandbox, providers, durability)
 web/                  Browser UI assets
 docs/                 User-facing setup and feature guides
 photos/               App screenshots and visual assets used by docs/web
 internal/             Internal packaging and launcher support files
-.github/              GitHub metadata and repository automation
+.github/              GitHub metadata, CI workflow, and repository automation
 ```
 
 Runtime data normally lives under `~/.lumakit/`, including user config,
@@ -335,9 +377,9 @@ python -m surfaces.cli
 
 LumaKit should be easy to explain:
 
-1. Install Ollama.
-2. Install LumaKit.
+1. Install LumaKit.
+2. Bring a model — an API key for Claude/GPT/Grok, or local Ollama for full privacy.
 3. Run `lumakit open`.
-4. Start using an Ollama-powered agent with a real UI and real tools.
+4. Delegate a job, watch it work, approve the risky steps, get pinged when it's done.
 
-That is the standard the repo should hold itself to.
+Chat assistants answer you. LumaKit does the job. That is the standard the repo should hold itself to.

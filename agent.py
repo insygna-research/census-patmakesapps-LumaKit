@@ -42,25 +42,27 @@ CONFIRM_TOOLS = {
 # Tools that have a built-in preview/confirm flow — always preview first
 PREVIEW_TOOLS = {"move_path"}
 
-# Tools that always require explicit approval, even when the user has disabled
-# normal tool approvals.
-PROTECTED_APPROVAL_TOOLS = {"delete_file", "git_add", "git_commit", "git_push"}
-PROTECTED_SHELL_COMMAND_RE = re.compile(
-    r"\bgit\s+(add|commit|push)\b|\b(rm|del|erase|unlink)\b",
-    re.IGNORECASE,
+# Approval policy lives in core/approval_policy.py so the interactive agent
+# and the autonomous task runner share one definition (S-4/D-2).
+from core.approval_policy import (
+    active_surface_denied_tools as _surface_denied_tools,
+    surface_tool_denial as _surface_tool_denial,
+    tool_always_requires_approval as _policy_always_requires_approval,
 )
 
-# Keep tool outputs useful, but prevent a single tool call from bloating the
-# active chat history enough to stall later model requests.
-TOOL_HISTORY_MAX_CHARS = 4000
-TOOL_HISTORY_STRING_LIMIT = 2000
-TOOL_HISTORY_READ_LIMIT = 2500
-TOOL_HISTORY_STDIO_LIMIT = 2500
-TOOL_HISTORY_LIST_LIMIT = 40
-TOOL_HISTORY_DICT_LIMIT = 60
-TOOL_HISTORY_BROWSER_LIST_LIMIT = 25
-TOOL_HISTORY_BROWSER_ACTION_LIMIT = 12
-TOOL_HISTORY_BROWSER_TEXT_LIMIT = 2000
+# Tool-result compaction, diff previews, and the project tree renderer were
+# extracted to core/ (D-1). Names are re-imported here for compatibility.
+from core.history_compaction import (  # noqa: E402,F401
+    TOOL_HISTORY_MAX_CHARS,
+    compact_tool_message_content,
+    compact_tool_result_for_history,
+)
+from core.diff_preview import (  # noqa: E402
+    preview_delete as _preview_delete,
+    preview_edit as _preview_edit,
+    preview_write as _preview_write,
+)
+from core.project_tree import build_project_tree as _build_project_tree  # noqa: E402,F401
 
 
 def timestamp_message(message: dict) -> dict:
@@ -72,378 +74,6 @@ def timestamp_message(message: dict) -> dict:
     if role != "system" and not stamped.get("timestamp"):
         stamped["timestamp"] = datetime.now().isoformat()
     return stamped
-
-
-def _truncate_text(value, limit):
-    if not isinstance(value, str) or len(value) <= limit:
-        return value
-    omitted = len(value) - limit
-    return value[:limit] + f"... [truncated {omitted} chars]"
-
-
-def _compact_browser_history(data):
-    if not isinstance(data, dict):
-        return data
-
-    def _trim_browser_elements(elements):
-        limited_elements = []
-        for element in elements[:TOOL_HISTORY_BROWSER_LIST_LIMIT]:
-            if isinstance(element, dict):
-                trimmed = {}
-                for key in (
-                    "tag",
-                    "type",
-                    "id",
-                    "name",
-                    "placeholder",
-                    "aria_label",
-                    "data_testid",
-                    "text",
-                    "required",
-                    "suggested_selector",
-                    "css_path",
-                    "href",
-                    "role",
-                    "x",
-                    "y",
-                    "width",
-                    "height",
-                    "needs_coordinate_click",
-                    "error",
-                ):
-                    if key not in element:
-                        continue
-                    value = element[key]
-                    if isinstance(value, str):
-                        value = _truncate_text(value, 200)
-                    trimmed[key] = value
-                limited_elements.append(trimmed)
-            else:
-                limited_elements.append(_truncate_text(str(element), 300))
-        return limited_elements
-
-    def _trim_browser_snapshot(snapshot):
-        if not isinstance(snapshot, dict):
-            return snapshot
-        trimmed = {}
-        for key in ("url", "title"):
-            if isinstance(snapshot.get(key), str):
-                trimmed[key] = _truncate_text(snapshot[key], 300)
-        if isinstance(snapshot.get("page_text_snippet"), str):
-            trimmed["page_text_snippet"] = _truncate_text(
-                snapshot["page_text_snippet"], TOOL_HISTORY_BROWSER_TEXT_LIMIT
-            )
-        interactive_elements = snapshot.get("interactive_elements")
-        if isinstance(interactive_elements, list):
-            trimmed["interactive_elements"] = _trim_browser_elements(interactive_elements)
-            if len(interactive_elements) > TOOL_HISTORY_BROWSER_LIST_LIMIT:
-                trimmed["interactive_elements_truncated"] = (
-                    len(interactive_elements) - TOOL_HISTORY_BROWSER_LIST_LIMIT
-                )
-        forms = snapshot.get("forms")
-        if isinstance(forms, list):
-            trimmed["forms"] = _trim_browser_elements(forms)
-            if len(forms) > TOOL_HISTORY_BROWSER_LIST_LIMIT:
-                trimmed["forms_truncated"] = len(forms) - TOOL_HISTORY_BROWSER_LIST_LIMIT
-        return trimmed
-
-    compact = dict(data)
-    actions = compact.get("actions_performed")
-    if isinstance(actions, list):
-        limited_actions = []
-        for action in actions[:TOOL_HISTORY_BROWSER_ACTION_LIMIT]:
-            if not isinstance(action, dict):
-                limited_actions.append(action)
-                continue
-
-            entry = dict(action)
-            if isinstance(entry.get("text"), str):
-                entry["text"] = _truncate_text(
-                    entry["text"], TOOL_HISTORY_BROWSER_TEXT_LIMIT
-                )
-
-            links = entry.get("links")
-            if isinstance(links, list):
-                limited_links = []
-                for link in links[:TOOL_HISTORY_BROWSER_LIST_LIMIT]:
-                    if isinstance(link, dict):
-                        limited_links.append(
-                            {
-                                "text": _truncate_text(str(link.get("text", "")), 200),
-                                "href": _truncate_text(str(link.get("href", "")), 300),
-                            }
-                        )
-                    else:
-                        limited_links.append(_truncate_text(str(link), 300))
-                entry["links"] = limited_links
-                if len(links) > len(limited_links):
-                    entry["links_truncated"] = len(links) - len(limited_links)
-
-            elements = entry.get("elements")
-            if isinstance(elements, list):
-                entry["elements"] = _trim_browser_elements(elements)
-                if len(elements) > len(entry["elements"]):
-                    entry["elements_truncated"] = len(elements) - len(entry["elements"])
-
-            landmarks = entry.get("landmarks")
-            if isinstance(landmarks, list):
-                entry["landmarks"] = landmarks[:TOOL_HISTORY_BROWSER_LIST_LIMIT]
-
-            if isinstance(entry.get("recovery_hint"), str):
-                entry["recovery_hint"] = _truncate_text(entry["recovery_hint"], 300)
-
-            if isinstance(entry.get("recovery_snapshot"), dict):
-                entry["recovery_snapshot"] = _trim_browser_snapshot(entry["recovery_snapshot"])
-
-            limited_actions.append(entry)
-
-        compact["actions_performed"] = limited_actions
-        if len(actions) > len(limited_actions):
-            compact["actions_truncated"] = len(actions) - len(limited_actions)
-
-    if isinstance(compact.get("page_observation"), dict):
-        compact["page_observation"] = _trim_browser_snapshot(compact["page_observation"])
-
-    for key in ("page_text_snippet", "error"):
-        if isinstance(compact.get(key), str):
-            compact[key] = _truncate_text(
-                compact[key], TOOL_HISTORY_BROWSER_TEXT_LIMIT
-            )
-    for key in ("url", "final_url", "page_title", "final_title", "screenshot_path"):
-        if isinstance(compact.get(key), str):
-            compact[key] = _truncate_text(compact[key], 300)
-
-    return compact
-
-
-def _compact_value_for_history(value, path=()):
-    key = path[-1] if path else ""
-
-    if isinstance(value, str):
-        limit = TOOL_HISTORY_STRING_LIMIT
-        if key == "content":
-            limit = TOOL_HISTORY_READ_LIMIT
-        elif key in {"stdout", "stderr"}:
-            limit = TOOL_HISTORY_STDIO_LIMIT
-        elif key in {"text", "page_text_snippet", "error"}:
-            limit = TOOL_HISTORY_BROWSER_TEXT_LIMIT
-        elif key in {"href", "url", "final_url", "selector", "suggested_selector"}:
-            limit = 300
-        return _truncate_text(value, limit)
-
-    if isinstance(value, list):
-        limit = TOOL_HISTORY_LIST_LIMIT
-        if key in {"links", "elements"}:
-            limit = TOOL_HISTORY_BROWSER_LIST_LIMIT
-        elif key == "actions_performed":
-            limit = TOOL_HISTORY_BROWSER_ACTION_LIMIT
-        items = [
-            _compact_value_for_history(item, path + (str(i),))
-            for i, item in enumerate(value[:limit])
-        ]
-        if len(value) > limit:
-            items.append({"_truncated_items": len(value) - limit})
-        return items
-
-    if isinstance(value, dict):
-        items = list(value.items())
-        compact = {}
-        for key_name, item in items[:TOOL_HISTORY_DICT_LIMIT]:
-            compact[str(key_name)] = _compact_value_for_history(
-                item, path + (str(key_name),)
-            )
-        if len(items) > TOOL_HISTORY_DICT_LIMIT:
-            compact["_truncated_keys"] = len(items) - TOOL_HISTORY_DICT_LIMIT
-        return compact
-
-    return value
-
-
-def _summarize_large_tool_data(data):
-    if not isinstance(data, dict):
-        return _compact_value_for_history(data, ("data",))
-
-    summary = {}
-    for key in (
-        "path",
-        "count",
-        "status",
-        "created",
-        "deleted",
-        "bytes_written",
-        "replacements",
-        "page_title",
-        "final_title",
-        "url",
-        "final_url",
-        "screenshot_path",
-        "error",
-        "site",
-        "failed_action_count",
-        "completed_with_failures",
-        "blocked_reason",
-        "blocked_on_step",
-        "skipped_remaining_actions",
-    ):
-        if key in data:
-            summary[key] = _compact_value_for_history(data[key], ("data", key))
-
-    if isinstance(data.get("content"), str):
-        summary["content_preview"] = _truncate_text(data["content"], 2000)
-    if isinstance(data.get("stdout"), str):
-        summary["stdout_preview"] = _truncate_text(data["stdout"], 2000)
-    if isinstance(data.get("stderr"), str):
-        summary["stderr_preview"] = _truncate_text(data["stderr"], 2000)
-    if isinstance(data.get("page_text_snippet"), str):
-        summary["page_text_snippet"] = _truncate_text(
-            data["page_text_snippet"], TOOL_HISTORY_BROWSER_TEXT_LIMIT
-        )
-
-    actions = data.get("actions_performed")
-    if isinstance(actions, list):
-        summary["actions_performed"] = _compact_browser_history(
-            {"actions_performed": actions}
-        )["actions_performed"]
-
-    if isinstance(data.get("page_observation"), dict):
-        summary["page_observation"] = _compact_browser_history(
-            {"page_observation": data["page_observation"]}
-        )["page_observation"]
-
-    if not summary:
-        summary["available_keys"] = list(data.keys())[:20]
-
-    return summary
-
-
-def compact_tool_result_for_history(tool_name, tool_result):
-    """Serialize a tool result with size guards so chats stay responsive."""
-    payload = tool_result
-    if isinstance(payload, dict):
-        payload = json.loads(json.dumps(payload, default=str))
-        if tool_name == "browser_automation" and isinstance(payload.get("data"), dict):
-            payload["data"] = _compact_browser_history(payload["data"])
-        payload = _compact_value_for_history(payload)
-
-    serialized = json.dumps(payload, ensure_ascii=False)
-    if len(serialized) <= TOOL_HISTORY_MAX_CHARS:
-        return serialized
-
-    fallback = {
-        "success": bool(tool_result.get("success")) if isinstance(tool_result, dict) else True,
-        "tool": tool_name,
-        "truncated": True,
-        "note": (
-            "Tool output was trimmed before being stored in chat history to keep "
-            "later model calls responsive."
-        ),
-    }
-    if isinstance(tool_result, dict):
-        if "error" in tool_result:
-            fallback["error"] = _truncate_text(str(tool_result["error"]), 1000)
-        if "data" in tool_result:
-            fallback["data"] = _summarize_large_tool_data(tool_result["data"])
-    else:
-        fallback["data"] = _truncate_text(str(tool_result), 4000)
-
-    serialized = json.dumps(fallback, ensure_ascii=False)
-    if len(serialized) > TOOL_HISTORY_MAX_CHARS:
-        serialized = _truncate_text(serialized, TOOL_HISTORY_MAX_CHARS)
-    return serialized
-
-
-def compact_tool_message_content(tool_name, content):
-    """Re-compact an existing tool-history message, including old saved chats."""
-    if not isinstance(content, str):
-        return content
-    try:
-        parsed = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        return _truncate_text(content, TOOL_HISTORY_MAX_CHARS)
-    return compact_tool_result_for_history(tool_name, parsed)
-
-
-def _build_project_tree(root: Path, max_depth: int = 3) -> str:
-    lines = []
-    skip = {".git", "__pycache__", "node_modules", ".venv", "venv", ".env"}
-
-    def _walk(directory: Path, prefix: str, depth: int):
-        if depth > max_depth:
-            return
-        try:
-            entries = sorted(
-                directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
-            )
-        except PermissionError:
-            return
-        dirs = [e for e in entries if e.is_dir() and e.name not in skip]
-        files = [e for e in entries if e.is_file()]
-        items = dirs + files
-        for i, entry in enumerate(items):
-            connector = "└── " if i == len(items) - 1 else "├── "
-            lines.append(
-                f"{prefix}{connector}{entry.name}{'/' if entry.is_dir() else ''}"
-            )
-            if entry.is_dir():
-                extension = "    " if i == len(items) - 1 else "│   "
-                _walk(entry, prefix + extension, depth + 1)
-
-    lines.append(f"{root.name}/")
-    _walk(root, "", 1)
-    return "\n".join(lines)
-
-
-def _preview_edit(inputs: dict) -> dict | None:
-    """Compute what edit_file would produce without writing. Returns diff info or None."""
-    from core.paths import resolve_repo_path, get_display_path
-
-    try:
-        path = resolve_repo_path(inputs["path"], kind="file")
-    except (FileNotFoundError, ValueError):
-        return None
-    content = path.read_text(encoding="utf-8", errors="replace")
-    newline = detect_line_ending(content)
-    find_text = normalize_line_endings(inputs["find"], newline)
-    replace_text = normalize_line_endings(inputs["replace"], newline)
-    if find_text not in content:
-        return None
-    replace_all = bool(inputs.get("replace_all", False))
-    updated = (
-        content.replace(find_text, replace_text)
-        if replace_all
-        else content.replace(find_text, replace_text, 1)
-    )
-    return build_unified_diff(content, updated, path)
-
-
-def _preview_write(inputs: dict) -> dict | None:
-    """Compute what write_file would produce without writing. Returns diff info."""
-    from core.paths import resolve_repo_path
-
-    try:
-        path = resolve_repo_path(inputs["path"], must_exist=False, kind="file")
-    except ValueError:
-        return None
-    is_new = not path.exists()
-    before = path.read_text(encoding="utf-8", errors="replace") if not is_new else ""
-    preferred_newline = detect_line_ending(before) if before else "\n"
-    after = normalize_line_endings(inputs["content"], preferred_newline)
-    result = build_unified_diff(before, after, path)
-    if result is not None:
-        result["is_new"] = is_new
-    return result
-
-
-def _preview_delete(inputs: dict) -> dict | None:
-    """Compute what delete_file would show. Returns diff info."""
-    from core.paths import resolve_repo_path
-
-    try:
-        path = resolve_repo_path(inputs["path"], kind="file")
-    except (FileNotFoundError, ValueError):
-        return None
-    before = path.read_text(encoding="utf-8", errors="replace")
-    return build_unified_diff(before, "", path)
 
 
 class Agent:
@@ -503,14 +133,18 @@ class Agent:
         self._system_prompt_cache = {}
         self._system_message_cache = {}
 
-        # Initialize Ollama Client
-        self.default_model = os.getenv("OLLAMA_MODEL")
-        self.default_fallback_model = os.getenv("OLLAMA_FALLBACK_MODEL")
+        # Initialize the LLM provider client (Ollama/Anthropic/OpenAI/xAI).
+        # Kept on `self.ollama` for backwards compatibility — every client
+        # shares the same chat()/last_model_used surface.
+        from core.providers import create_llm_client, default_fallback_model, default_model
+
+        self.default_model = default_model() or None
+        self.default_fallback_model = default_fallback_model() or None
         self.local_model = os.getenv("OLLAMA_LOCAL_MODEL")
         self.model = self.default_model
         self.fallback_model = self.default_fallback_model
         self.last_model_used = None
-        self.ollama = OllamaClient(fallback_model=self.fallback_model)
+        self.ollama = create_llm_client(fallback_model=self.fallback_model)
 
         root = self.workspace_root
 
@@ -709,7 +343,9 @@ class Agent:
                 check_interrupt=self._check_interrupt,
                 priority="foreground",
             )
-        except Exception:
+        except Exception as exc:
+            from core import log
+            log.warn("agent", "completion-summary generation failed; using fallback text", exc)
             return ""
 
         return str(response.get("message", {}).get("content") or "").strip()
@@ -818,19 +454,41 @@ class Agent:
     REPEAT_ATTEMPT_LIMIT = 3
 
     def _register_tool_attempt(self, tool_name: str, tool_inputs: dict) -> tuple | None:
-        """Record this attempt. Returns the signature that hit the limit, or None."""
+        """Return a signature that has already FAILED the limit, else None.
+
+        Only failed/no-progress attempts count (tracked by
+        _record_tool_outcome); repeatedly reading the same file successfully
+        is legitimate and must never trip the loop detector.
+        """
         counts = getattr(self, "_attempt_counts", None)
         if counts is None:
             counts = {}
             self._attempt_counts = counts
-        over = None
         for sig in self._target_signatures(tool_name, tool_inputs):
             if not sig[-1]:
                 continue
-            counts[sig] = counts.get(sig, 0) + 1
-            if counts[sig] >= self.REPEAT_ATTEMPT_LIMIT and over is None:
-                over = sig
-        return over
+            if counts.get(sig, 0) >= self.REPEAT_ATTEMPT_LIMIT:
+                return sig
+        return None
+
+    def _record_tool_outcome(self, tool_name: str, tool_inputs: dict, tool_result: dict) -> None:
+        """Update loop-detector state: failure/skip increments, success resets."""
+        counts = getattr(self, "_attempt_counts", None)
+        if counts is None:
+            counts = {}
+            self._attempt_counts = counts
+        result = tool_result or {}
+        data = result.get("data") or {}
+        made_progress = bool(result.get("success")) and not (
+            isinstance(data, dict) and data.get("skipped")
+        )
+        for sig in self._target_signatures(tool_name, tool_inputs):
+            if not sig[-1]:
+                continue
+            if made_progress:
+                counts.pop(sig, None)
+            else:
+                counts[sig] = counts.get(sig, 0) + 1
 
     def _apply_pending_guidance(self) -> None:
         pending = self.run_controller.consume_pending_guidance()
@@ -929,7 +587,7 @@ class Agent:
         cache_key = (self.registry.version, group_key)
         cached = self._tools_schema_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return self._filter_role_denied_tools(cached)
 
         result = []
         group_filter = set(groups or [])
@@ -953,7 +611,19 @@ class Agent:
             self._tools_schema_cache = {}
             self._tools_schema_cache_version = self.registry.version
         self._tools_schema_cache[cache_key] = result
-        return result
+        return self._filter_role_denied_tools(result)
+
+    @staticmethod
+    def _filter_role_denied_tools(tools):
+        """Hide tools the current per-turn user's role can't use (S-6).
+
+        Applied after the cache (which is keyed per registry version, not per
+        user). Execution is separately blocked at dispatch, so this filter is
+        UX, not the security boundary."""
+        denied = _surface_denied_tools()
+        if not denied:
+            return tools
+        return [t for t in tools if t["function"]["name"] not in denied]
 
     def _trim_history(self):
         if not needs_summarization(self.messages):
@@ -1110,14 +780,7 @@ class Agent:
         return self.execute_tool(tool_name, tool_inputs)
 
     def _tool_always_requires_approval(self, tool_name: str, tool_inputs: dict) -> bool:
-        if tool_name in PROTECTED_APPROVAL_TOOLS:
-            return True
-        if tool_name in {"execute_shell", "run_command"}:
-            command = str(tool_inputs.get("command", "") or "")
-            if not command and isinstance(tool_inputs.get("args"), list):
-                command = " ".join(str(part) for part in tool_inputs.get("args", []))
-            return bool(PROTECTED_SHELL_COMMAND_RE.search(command))
-        return False
+        return _policy_always_requires_approval(tool_name, tool_inputs)
 
     def _check_interrupt(self):
         """Returns True if the current run should abort. Also polls the callback."""
@@ -1128,8 +791,9 @@ class Agent:
                 if self.check_interrupt():
                     self.run_controller.request_stop()
                     self.interrupt_requested = True
-            except Exception:
-                pass
+            except Exception as exc:
+                from core import log
+                log.debug("agent", "check_interrupt callback raised; treating as not-interrupted", exc)
         return self.interrupt_requested
 
     def _request_interrupt(self):
@@ -1368,10 +1032,18 @@ class Agent:
                         function_data = tool_call.get("function", {})
                         tool_name = function_data.get("name")
                         tool_inputs = function_data.get("arguments", {})
+                        # Some models emit the whole argument object as a JSON
+                        # string — normalize once here so previews/approval
+                        # policy see a real dict (R-7).
+                        try:
+                            tool_inputs = ToolRegistry.normalize_inputs(tool_inputs)
+                        except ValueError:
+                            tool_inputs = {}
 
-                        # Semantic loop detection: count attempts per logical
-                        # target, not per exact argument blob. Three tries on
-                        # the same (tool, action, target) → short-circuit.
+                        # Semantic loop detection: count FAILED attempts per
+                        # logical target (successes reset the counter). Three
+                        # failures on the same (tool, action, target) →
+                        # short-circuit before trying a fourth time.
                         over_limit = self._register_tool_attempt(tool_name, tool_inputs)
                         if over_limit is not None:
                             _, action_type, target = over_limit
@@ -1402,7 +1074,14 @@ class Agent:
                         )
                         self.display.show_tool_call(tool_name, tool_inputs)
 
-                        if tool_name in DIFF_TOOLS:
+                        role_denial = _surface_tool_denial(tool_name)
+                        if role_denial:
+                            tool_result = {
+                                "success": False,
+                                "error": role_denial,
+                                "toolName": tool_name,
+                            }
+                        elif tool_name in DIFF_TOOLS:
                             tool_result = self._handle_diff_tool(tool_name, tool_inputs)
                         elif tool_name in PREVIEW_TOOLS:
                             tool_result = self._handle_preview_tool(tool_name, tool_inputs)
@@ -1415,6 +1094,7 @@ class Agent:
                             return self._interrupt_response()
 
                         self.display.show_tool_result(tool_result)
+                        self._record_tool_outcome(tool_name, tool_inputs, tool_result)
                         summary, is_error = self._tool_result_activity_summary(tool_name, tool_result)
                         self.run_controller.mark_tool_end(tool_name, summary, error=is_error)
 
