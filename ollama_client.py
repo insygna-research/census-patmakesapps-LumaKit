@@ -64,8 +64,9 @@ class _OllamaGenerationScheduler:
                                 raise OllamaInterruptedError("Interrupted by /stop.")
                         except OllamaInterruptedError:
                             raise
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            from core import log
+                            log.debug("ollama", "check_interrupt raised while queued", exc)
                     self._condition.wait(timeout=0.1)
             except Exception:
                 if request in self._pending:
@@ -85,8 +86,9 @@ class _OllamaGenerationScheduler:
                             raise OllamaInterruptedError("Interrupted by /stop.")
                     except OllamaInterruptedError:
                         raise
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        from core import log
+                        log.debug("ollama", "check_interrupt raised while waiting for slot", exc)
         except Exception:
             with self._condition:
                 self._busy = False
@@ -155,8 +157,9 @@ class OllamaClient:
                             raise OllamaInterruptedError("Interrupted by /stop.")
                     except OllamaInterruptedError:
                         raise
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        from core import log
+                        log.debug("ollama", "check_interrupt raised while waiting for cloud slot", exc)
         _OLLAMA_GENERATION_SCHEDULER.acquire(
             priority=priority,
             check_interrupt=check_interrupt,
@@ -212,7 +215,14 @@ class OllamaClient:
             for line in response.iter_lines(decode_unicode=True):
                 if not line:
                     continue
-                self._merge_stream_chunk(aggregate, json.loads(line), on_chunk=on_chunk)
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    # Keep-alives / malformed lines must not abort mid-stream.
+                    from core import log
+                    log.debug("ollama", f"skipping unparseable stream line ({line[:80]!r})", exc)
+                    continue
+                self._merge_stream_chunk(aggregate, payload, on_chunk=on_chunk)
             aggregate.setdefault("message", {}).setdefault("content", "")
             return aggregate
         return response.json()
@@ -348,7 +358,9 @@ class OllamaClient:
                     raise OllamaInterruptedError("Interrupted by /stop.")
             except OllamaInterruptedError:
                 raise
-            except Exception:
+            except Exception as exc:
+                from core import log
+                log.debug("ollama", "check_interrupt raised during request", exc)
                 continue
 
         if "error" in outcome:

@@ -10,9 +10,8 @@ DB_PATH = get_data_dir() / "memory" / "memory.db"
 
 
 def _connect():
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    from core.db import connect as db_connect
+    conn = db_connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id TEXT PRIMARY KEY,
@@ -58,23 +57,10 @@ def _connect():
         conn.execute("ALTER TABLE conversations ADD COLUMN display_messages TEXT")
         columns.add("display_messages")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_owner_updated ON conversations(owner_id, updated_at)")
-    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if user_version < 1:
-        conn.execute("""
-            UPDATE conversations
-               SET owner_id = (
-                   SELECT user_id
-                     FROM active_chats
-                    WHERE active_chats.chat_id = conversations.id
-                    ORDER BY active_chats.updated_at DESC
-                    LIMIT 1
-               )
-             WHERE owner_id IS NULL
-               AND EXISTS (
-                   SELECT 1 FROM active_chats WHERE active_chats.chat_id = conversations.id
-               )
-        """)
-        conn.execute("PRAGMA user_version = 1")
+    # memory.db's user_version is owned by core/memory_db.py — never touch the
+    # pragma from individual stores (R-2).
+    from core.memory_db import run_versioned_migrations
+    run_versioned_migrations(conn)
     conn.commit()
     return conn
 

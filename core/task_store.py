@@ -54,9 +54,8 @@ def _emit(event: dict) -> None:
 
 
 def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    from core.db import connect as db_connect
+    conn = db_connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +82,33 @@ def _connect() -> sqlite3.Connection:
     # long-running task keep full context across rounds and survive restarts.
     if "messages" not in columns:
         conn.execute("ALTER TABLE tasks ADD COLUMN messages TEXT NOT NULL DEFAULT '[]'")
+    # Append-only history (R-5): one row per entry instead of rewriting a JSON
+    # blob per append, so per-round write cost stays constant on long tasks.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS task_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            entry TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_history_task ON task_history(task_id, id)"
+    )
+    # One-time migration of legacy blob histories into the table. task_store is
+    # the sole owner of tasks.db's user_version.
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        for row in conn.execute("SELECT id, history FROM tasks WHERE history != '[]'").fetchall():
+            try:
+                entries = json.loads(row["history"])
+            except (json.JSONDecodeError, TypeError):
+                entries = []
+            for entry in entries:
+                conn.execute(
+                    "INSERT INTO task_history (task_id, entry) VALUES (?, ?)",
+                    (row["id"], json.dumps(entry, default=str)),
+                )
+        conn.execute("UPDATE tasks SET history='[]'")
+        conn.execute("PRAGMA user_version = 1")
     conn.commit()
     return conn
 
@@ -143,25 +169,51 @@ def set_plan(task_id: int, plan: list, next_run_at: str | None = None) -> None:
 
 
 def append_history(task_id: int, entry: dict) -> None:
-    """Append one entry to the task's history log.
+    """Append one entry to the task's history log (append-only table, R-5).
 
-    Caps the stored history at HISTORY_SOFT_CAP entries; older entries are
-    dropped to keep the SQLite blob from growing without bound.
+    Keeps at most HISTORY_SOFT_CAP entries per task; older rows are pruned so
+    multi-day tasks don't grow without bound.
     """
     conn = _connect()
-    row = conn.execute("SELECT history FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if not row:
+    exists = conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not exists:
         conn.close()
         return
-    history = json.loads(row["history"])
     entry_with_ts = {**entry, "timestamp": datetime.now().isoformat()}
-    history.append(entry_with_ts)
-    if len(history) > HISTORY_SOFT_CAP:
-        history = history[-HISTORY_SOFT_CAP:]
-    conn.execute("UPDATE tasks SET history=? WHERE id=?", (json.dumps(history), task_id))
+    conn.execute(
+        "INSERT INTO task_history (task_id, entry) VALUES (?, ?)",
+        (task_id, json.dumps(entry_with_ts, default=str)),
+    )
+    conn.execute(
+        """DELETE FROM task_history
+           WHERE task_id = ?
+             AND id NOT IN (
+                 SELECT id FROM task_history WHERE task_id = ?
+                 ORDER BY id DESC LIMIT ?
+             )""",
+        (task_id, task_id, HISTORY_SOFT_CAP),
+    )
     conn.commit()
     conn.close()
     _emit({"type": "history_appended", "task_id": task_id, "entry": entry_with_ts})
+
+
+def _load_histories(conn, task_ids: list[int]) -> dict[int, list]:
+    """Fetch histories for a set of tasks in one query."""
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"SELECT task_id, entry FROM task_history WHERE task_id IN ({placeholders}) ORDER BY id",
+        task_ids,
+    ).fetchall()
+    histories: dict[int, list] = {tid: [] for tid in task_ids}
+    for row in rows:
+        try:
+            histories[row["task_id"]].append(json.loads(row["entry"]))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return histories
 
 
 def advance_step(task_id: int, next_run_at: str) -> None:
@@ -301,6 +353,7 @@ def delete_task(task_id: int) -> bool:
     """Permanently delete a task. Returns False if it wasn't found."""
     conn = _connect()
     cursor = conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    conn.execute("DELETE FROM task_history WHERE task_id=?", (task_id,))
     conn.commit()
     conn.close()
     if cursor.rowcount > 0:
@@ -313,13 +366,23 @@ def delete_task(task_id: int) -> bool:
 # Read helpers
 # ---------------------------------------------------------------------------
 
+def _rows_to_tasks(conn, rows) -> list[dict]:
+    tasks = [_deserialize(dict(r)) for r in rows]
+    histories = _load_histories(conn, [t["id"] for t in tasks])
+    for task in tasks:
+        task["history"] = histories.get(task["id"], [])
+    return tasks
+
+
 def get_task(task_id: int) -> dict | None:
     conn = _connect()
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    conn.close()
     if not row:
+        conn.close()
         return None
-    return _deserialize(dict(row))
+    task = _rows_to_tasks(conn, [row])[0]
+    conn.close()
+    return task
 
 
 def get_tasks_by_owner(chat_id: str, limit: int = 20) -> list[dict]:
@@ -328,8 +391,9 @@ def get_tasks_by_owner(chat_id: str, limit: int = 20) -> list[dict]:
         "SELECT * FROM tasks WHERE owner_chat_id=? ORDER BY created_at DESC LIMIT ?",
         (chat_id, limit),
     ).fetchall()
+    tasks = _rows_to_tasks(conn, rows)
     conn.close()
-    return [_deserialize(dict(r)) for r in rows]
+    return tasks
 
 
 def get_all_tasks(limit: int = 50) -> list[dict]:
@@ -337,8 +401,9 @@ def get_all_tasks(limit: int = 50) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
     ).fetchall()
+    tasks = _rows_to_tasks(conn, rows)
     conn.close()
-    return [_deserialize(dict(r)) for r in rows]
+    return tasks
 
 
 def get_due_tasks() -> list[dict]:
@@ -358,8 +423,9 @@ def get_due_tasks() -> list[dict]:
            ORDER BY next_run_at ASC""",
         (now,),
     ).fetchall()
+    tasks = _rows_to_tasks(conn, rows)
     conn.close()
-    return [_deserialize(dict(r)) for r in rows]
+    return tasks
 
 
 def get_overdue_tasks() -> list[dict]:
@@ -373,8 +439,9 @@ def get_overdue_tasks() -> list[dict]:
              AND due_at <= ?""",
         (now,),
     ).fetchall()
+    tasks = _rows_to_tasks(conn, rows)
     conn.close()
-    return [_deserialize(dict(r)) for r in rows]
+    return tasks
 
 
 def save_session(task_id: int, messages: list, plan: list | None = None,

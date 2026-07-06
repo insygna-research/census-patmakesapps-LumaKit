@@ -10,9 +10,8 @@ DB_PATH = get_data_dir() / "memory" / "memory.db"
 
 
 def _connect():
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    from core.db import connect as db_connect
+    conn = db_connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pending_email_drafts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

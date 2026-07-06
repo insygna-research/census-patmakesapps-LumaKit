@@ -8,9 +8,8 @@ DB_PATH = get_data_dir() / "memory" / "memory.db"
 
 def _connect():
     """Open a connection and create the table if it doesn't exist yet."""
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    from core.db import connect as db_connect
+    conn = db_connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,7 +21,9 @@ def _connect():
             created_by TEXT
         )
     """)
-    # Migrate older DBs that predate the scope/authorship columns.
+    # Migrate older DBs that predate the scope/authorship columns. This is an
+    # idempotent column sniff, NOT a versioned migration — memory.db's
+    # user_version is owned exclusively by core/memory_db.py (R-2).
     existing = {row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
     if "chat_id" not in existing:
         conn.execute("ALTER TABLE memories ADD COLUMN chat_id TEXT")

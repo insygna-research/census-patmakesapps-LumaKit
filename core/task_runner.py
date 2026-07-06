@@ -36,16 +36,13 @@ from pathlib import Path
 from typing import Callable
 
 from core import summarizer, task_store
+from core.approval_policy import autonomous_tool_refusal
 from core.paths import get_data_dir, get_repo_root, workspace_context
 from core.runtime_config import get_effective_config_for_user
 from ollama_client import OllamaClient
 
 
-PROTECTED_TASK_TOOLS = {"delete_file", "git_add", "git_commit", "git_push"}
-PROTECTED_TASK_SHELL_RE = re.compile(
-    r"\bgit\s+(add|commit|push)\b|\b(rm|del|erase|unlink)\b",
-    re.IGNORECASE,
-)
+
 # Module-level handle to the active runner so non-service code paths
 # (the web API, chat tools) can read its heartbeat without plumbing the
 # service object through.
@@ -269,11 +266,28 @@ class TaskRunner:
     # Continuous drive loop
     # ------------------------------------------------------------------
 
+    # Persist the live message thread every N rounds instead of every round —
+    # rewriting the whole JSON blob per round is O(n) write amplification on
+    # long tasks (R-5). Every exit path still checkpoints, so at most the last
+    # few rounds of *context* (never history/results) are re-done after a hard
+    # crash mid-drive.
+    SESSION_CHECKPOINT_EVERY = 5
+
     def _drive(self, task: dict) -> None:
         task_id = task["id"]
         drive_started = time.monotonic()
         rounds = 0
         nudges = 0
+        messages: list | None = None
+        rounds_since_checkpoint = 0
+
+        def checkpoint(force: bool = True) -> None:
+            nonlocal rounds_since_checkpoint
+            if messages is None:
+                return
+            if force or rounds_since_checkpoint >= self.SESSION_CHECKPOINT_EVERY:
+                task_store.save_session(task_id, messages)
+                rounds_since_checkpoint = 0
 
         ollama = self._get_ollama()
         registry = self._get_registry()
@@ -285,23 +299,27 @@ class TaskRunner:
         while not self._stop.is_set():
             task = task_store.get_task(task_id)
             if not task or task["status"] != "active":
+                checkpoint()
                 return
 
-            messages = task.get("messages") or []
-            if not messages:
-                self._begin_task(task)
-                return
+            if messages is None:
+                messages = task.get("messages") or []
+                if not messages:
+                    self._begin_task(task)
+                    return
 
             if (
                 rounds >= self.MAX_ROUNDS_PER_DRIVE
                 or (time.monotonic() - drive_started) >= self.TASK_TICK_BUDGET_SECONDS
             ):
+                checkpoint()
                 task_store.update_task(task_id, next_run_at=datetime.now().isoformat())
                 print(f"[task-runner] task {task_id} yielding after {rounds} round(s); resumes next tick")
                 return
 
             probe_err = self._probe_ollama()
             if probe_err is not None:
+                checkpoint()
                 self._handle_runtime_error(task, probe_err)
                 return
 
@@ -317,11 +335,13 @@ class TaskRunner:
                     priority="normal",
                 )
             except Exception as e:
+                checkpoint()
                 self._handle_runtime_error(task, f"LLM error during round: {e}")
                 return
 
             self._clear_runtime_retries(task_id, task)
             rounds += 1
+            rounds_since_checkpoint += 1
 
             message = response.get("message", {})
             messages.append(message)
@@ -377,6 +397,13 @@ class TaskRunner:
                 fn = tc.get("function", {})
                 name = fn.get("name")
                 inputs = fn.get("arguments", {}) or {}
+                # Normalize stringified argument blobs once, centrally, so the
+                # control tools below and the registry all see a dict (R-7).
+                from tool_registry import ToolRegistry
+                try:
+                    inputs = ToolRegistry.normalize_inputs(inputs)
+                except ValueError:
+                    inputs = {}
 
                 # Once the task is finishing or pausing, don't execute any more
                 # calls from this batch — but still append a tool result for each
@@ -432,7 +459,8 @@ class TaskRunner:
                     "role": "tool", "name": name, "content": self._tool_content_for_thread(result),
                 })
 
-            task_store.save_session(task_id, messages)
+            # Checkpoint every N rounds, and always before a state change.
+            checkpoint(force=control is not None)
 
             if control and control[0] == "wait":
                 self._schedule_wait(task, control[1], control[2])
@@ -444,7 +472,7 @@ class TaskRunner:
             # Keep context bounded for long/multi-day tasks.
             messages, compacted = self._maybe_compact(messages, model)
             if compacted:
-                task_store.save_session(task_id, messages)
+                checkpoint()
             # Loop immediately — drive to completion, no artificial gaps.
 
     # ------------------------------------------------------------------
@@ -453,22 +481,13 @@ class TaskRunner:
 
     def _run_tool(self, task_id: int, name: str | None, inputs: dict) -> dict:
         registry = self._get_registry()
-        command_text = str(inputs.get("command", "") or "")
-        if not command_text and isinstance(inputs.get("args"), list):
-            command_text = " ".join(str(part) for part in inputs.get("args", []))
         self._emit(task_id, "tool", tool=name or "?", detail=_summarize_tool_args(name, inputs))
 
-        protected_shell = (
-            name in {"execute_shell", "run_command"}
-            and PROTECTED_TASK_SHELL_RE.search(command_text)
-        )
-        if name in PROTECTED_TASK_TOOLS or protected_shell:
+        refusal = autonomous_tool_refusal(name, inputs)
+        if refusal:
             return {
                 "success": False,
-                "error": (
-                    f"{name} requires explicit user approval and cannot run "
-                    "inside an autonomous task."
-                ),
+                "error": refusal,
                 "toolName": name,
             }
         result = registry.execute(name, inputs)
@@ -476,41 +495,16 @@ class TaskRunner:
         return result
 
     def _tool_content_for_thread(self, result: dict) -> str:
-        """Serialize a tool result for the persistent thread, trimming oversized
-        payloads so big CSV/dir/diff dumps don't bloat context and choke the
-        model. Keeps the parts the agent actually needs to reason about."""
+        """Serialize a tool result for the persistent thread. Uses the same
+        compaction rules as the interactive agent (D-3), just with this
+        runner's tighter budget."""
+        from core.history_compaction import compact_tool_result_for_history
         try:
-            full = json.dumps(result, default=str)
+            return compact_tool_result_for_history(
+                None, result, max_chars=self.MAX_TOOL_RESULT_CHARS
+            )
         except Exception:
             return json.dumps({"success": bool(isinstance(result, dict) and result.get("success", True))})
-        if len(full) <= self.MAX_TOOL_RESULT_CHARS:
-            return full
-
-        trimmed: dict = {"success": result.get("success", True) if isinstance(result, dict) else True,
-                         "truncated": True}
-        if isinstance(result, dict) and result.get("error"):
-            trimmed["error"] = str(result["error"])[:600]
-        data = result.get("data") if isinstance(result, dict) else None
-        if isinstance(data, dict):
-            small: dict = {}
-            for k in ("path", "count", "created", "deleted", "bytes_written",
-                      "replacements", "cwd", "returncode", "success"):
-                if k in data:
-                    small[k] = data[k]
-            for k in ("stdout", "stderr", "content", "diff"):
-                v = data.get(k)
-                if isinstance(v, str):
-                    small[k] = v if len(v) <= 1500 else v[:1500] + "\n...[truncated]"
-            entries = data.get("entries")
-            if isinstance(entries, list):
-                small["entries"] = entries[:30]
-                if len(entries) > 30:
-                    small["entries_truncated"] = len(entries) - 30
-            trimmed["data"] = small
-        elif data is not None:
-            trimmed["data_preview"] = str(data)[:1500]
-        out = json.dumps(trimmed, default=str)
-        return out if len(out) <= self.MAX_TOOL_RESULT_CHARS else out[:self.MAX_TOOL_RESULT_CHARS]
 
     def _bump_stuck(self, task_id: int, task: dict) -> int:
         constraints = dict(task.get("constraints") or {})
@@ -955,23 +949,28 @@ class TaskRunner:
     def _emit(self, task_id: int, kind: str, **extra) -> None:
         try:
             task_store.append_history(task_id, {"type": "activity", "kind": kind, **extra})
-        except Exception:
-            pass
+        except Exception as exc:
+            # Keep the task alive, but a failing history write means live
+            # activity is being lost — make that visible.
+            from core import log
+            log.warn("task_runner", f"history write failed for task {task_id} ({kind})", exc)
 
     # ------------------------------------------------------------------
     # Model / registry / workspace helpers
     # ------------------------------------------------------------------
 
     def _model_config(self, owner_chat_id: str | None = None) -> dict:
+        from core.providers import default_fallback_model, default_model
         cfg = get_effective_config_for_user(owner_chat_id)
         return {
-            "primary_model": cfg.get("primary_model") or os.getenv("OLLAMA_MODEL"),
-            "fallback_model": cfg.get("fallback_model") or os.getenv("OLLAMA_FALLBACK_MODEL"),
+            "primary_model": cfg.get("primary_model") or default_model(),
+            "fallback_model": cfg.get("fallback_model") or default_fallback_model(),
         }
 
-    def _get_ollama(self) -> OllamaClient:
+    def _get_ollama(self):
         if self._ollama is None:
-            self._ollama = OllamaClient(fallback_model=os.getenv("OLLAMA_FALLBACK_MODEL"))
+            from core.providers import create_llm_client, default_fallback_model
+            self._ollama = create_llm_client(fallback_model=default_fallback_model() or None)
         return self._ollama
 
     def _get_registry(self):
