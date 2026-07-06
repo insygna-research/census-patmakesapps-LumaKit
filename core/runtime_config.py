@@ -24,11 +24,15 @@ def get_effective_config_for_user(
     local_model=None,
 ):
     """Return the effective model/runtime config for a user."""
-    env_model = default_model if default_model is not None else os.getenv("OLLAMA_MODEL")
+    env_model = (
+        default_model
+        if default_model is not None
+        else (os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL"))
+    )
     default_fallback = (
         default_fallback
         if default_fallback is not None
-        else os.getenv("OLLAMA_FALLBACK_MODEL")
+        else (os.getenv("LLM_FALLBACK_MODEL") or os.getenv("OLLAMA_FALLBACK_MODEL"))
     )
     local_model = local_model if local_model is not None else os.getenv("OLLAMA_LOCAL_MODEL", "")
     app_cfg = get_app_runtime_config()

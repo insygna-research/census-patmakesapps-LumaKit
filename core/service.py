@@ -203,8 +203,9 @@ class LumaKitService:
         self._heartbeat.start()
 
         def email_ask_llm(prompt):
+            from core.providers import create_llm_client
             cfg = get_effective_config_for_user(auth.get_owner())
-            client = OllamaClient(fallback_model=cfg["fallback_model"])
+            client = create_llm_client(fallback_model=cfg["fallback_model"])
             response = client.chat(
                 model=cfg["primary_model"],
                 messages=[{"role": "user", "content": prompt}],

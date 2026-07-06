@@ -17,7 +17,16 @@ DEFAULT_CONFIG = {
     "primary_model": "",
     "fallback_model": "",
     "require_tool_approvals": True,
+    # "" = follow the LLM_PROVIDER env var (default: ollama).
+    "llm_provider": "",
 }
+
+_VALID_PROVIDERS = {"", "ollama", "anthropic", "openai", "xai"}
+
+
+def _coerce_provider(value) -> str:
+    provider = str(value or "").strip().lower()
+    return provider if provider in _VALID_PROVIDERS else ""
 
 
 def _coerce_bool(value, default=True):
@@ -50,6 +59,7 @@ def load_app_runtime_config():
                     data.get("require_tool_approvals"),
                     True,
                 ),
+                "llm_provider": _coerce_provider(data.get("llm_provider")),
             }
         )
     return config
@@ -73,6 +83,7 @@ def save_app_runtime_config(config):
         payload.get("require_tool_approvals"),
         True,
     )
+    payload["llm_provider"] = _coerce_provider(payload.get("llm_provider"))
 
     CONFIG_PATH.parent.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")

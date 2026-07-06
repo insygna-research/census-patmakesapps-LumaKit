@@ -92,8 +92,9 @@ def _parse_notify_at(value: str) -> str | None:
     )
 
     try:
-        client = OllamaClient(fallback_model=model_cfg.get("fallback_model"))
-        model = model_cfg.get("primary_model") or os.getenv("OLLAMA_MODEL")
+        from core.providers import create_llm_client, default_model
+        client = create_llm_client(fallback_model=model_cfg.get("fallback_model"))
+        model = model_cfg.get("primary_model") or default_model()
         response = client.chat(
             model=model,
             messages=[{"role": "user", "content": prompt}],

@@ -90,9 +90,10 @@ class Heartbeat:
             )
 
             try:
+                from core.providers import create_llm_client, default_model
                 cfg = get_effective_config_for_user(self._owner_chat_id)
-                model = cfg.get("primary_model") or os.getenv("OLLAMA_MODEL")
-                client = OllamaClient(fallback_model=cfg.get("fallback_model"))
+                model = cfg.get("primary_model") or default_model()
+                client = create_llm_client(fallback_model=cfg.get("fallback_model"))
                 response = client.chat(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
