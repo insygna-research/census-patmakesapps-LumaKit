@@ -3,6 +3,7 @@
  * Boots WebSocket, initializes components, routes views.
  */
 
+import { wsUrl } from './lib/auth.js';
 import { WS } from './lib/ws.js';
 
 // --- DOM refs ---
@@ -1177,9 +1178,8 @@ async function loadTasks() {
 
 function connectTaskListWs() {
     if (taskListWs && taskListWs.readyState <= 1) return;
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     try {
-        taskListWs = new WebSocket(`${proto}://${location.host}/ws/tasks`);
+        taskListWs = new WebSocket(wsUrl('/ws/tasks'));
     } catch (_) {
         return;
     }
@@ -1552,9 +1552,8 @@ function connectTaskDetailWs(taskId) {
         try { taskDetailWs.close(); } catch (_) {}
         taskDetailWs = null;
     }
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     try {
-        taskDetailWs = new WebSocket(`${proto}://${location.host}/ws/tasks?task_id=${taskId}`);
+        taskDetailWs = new WebSocket(wsUrl(`/ws/tasks?task_id=${taskId}`));
     } catch (_) { return; }
     taskDetailWs.onmessage = async (evt) => {
         let msg;
@@ -1688,8 +1687,36 @@ async function loadSettings() {
         const approvalsOn = !!settings.require_tool_approvals;
         const approvalStateLabel = approvalsOn ? 'On' : 'Off';
 
+        const provider = settings.llm_provider || 'ollama';
+        const providerOptions = ['ollama', 'anthropic', 'openai', 'xai']
+            .map(p => `<option value="${p}" ${p === provider ? 'selected' : ''}>${{ollama: 'Ollama (local)', anthropic: 'Anthropic (Claude)', openai: 'OpenAI (GPT)', xai: 'xAI (Grok)'}[p]}</option>`)
+            .join('');
+        const keyStatus = settings.api_key_set
+            ? '<span class="setting-source-pill">key saved</span>'
+            : (provider === 'ollama' ? '' : '<span class="setting-source-pill">no key set</span>');
+
         $settingsContent.innerHTML = `
             ${banner}
+            <div class="settings-card">
+                <h3>Model Provider</h3>
+                <div class="settings-note">
+                    Run on local Ollama (private), or bring an API key for Claude, GPT, or Grok.
+                    The key is stored server-side only and is never shown again. ${keyStatus}
+                </div>
+                <form id="provider-form" class="settings-form">
+                    <div class="settings-field">
+                        <label for="provider-select">Provider</label>
+                        <select id="provider-select" class="settings-select">${providerOptions}</select>
+                    </div>
+                    <div class="settings-field" id="api-key-field" ${provider === 'ollama' ? 'style="display:none"' : ''}>
+                        <label for="api-key-input">API Key</label>
+                        <input id="api-key-input" class="settings-input" type="password" value="" placeholder="${settings.api_key_set ? 'Key saved — enter a new key to replace it' : 'Paste your API key'}" autocomplete="off">
+                    </div>
+                    <div class="settings-actions">
+                        <button type="submit" class="settings-btn primary">Save Provider</button>
+                    </div>
+                </form>
+            </div>
             <div class="settings-card">
                 <h3>Runtime Models</h3>
                 <div class="settings-note">
@@ -1801,6 +1828,27 @@ async function loadSettings() {
         const $settingsForm = document.getElementById('settings-form');
         const $resetModelSettings = document.getElementById('reset-model-settings');
         const $toolApprovalInputs = $settingsContent.querySelectorAll('input[name="tool-approvals"]');
+        const $providerForm = document.getElementById('provider-form');
+        const $providerSelect = document.getElementById('provider-select');
+        const $apiKeyField = document.getElementById('api-key-field');
+        const $apiKeyInput = document.getElementById('api-key-input');
+
+        $providerSelect?.addEventListener('change', () => {
+            if ($apiKeyField) {
+                $apiKeyField.style.display = $providerSelect.value === 'ollama' ? 'none' : '';
+            }
+        });
+
+        $providerForm?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const payload = { llm_provider: $providerSelect?.value || 'ollama' };
+            const key = ($apiKeyInput?.value || '').trim();
+            if (key) payload.llm_api_key = key;
+            await saveSettings(payload, {
+                successMessage: 'Provider settings saved. New chats use the new provider.',
+                busyLabel: 'Saving...',
+            });
+        });
 
         if (pendingSettingsFocus) {
             pendingSettingsFocus = false;
@@ -1837,10 +1885,20 @@ async function loadSettings() {
             input.addEventListener('change', async () => {
                 if (!input.checked) return;
                 const enabled = input.value === 'on';
+                const payload = { require_tool_approvals: enabled };
+                if (!enabled) {
+                    const ok = window.confirm(
+                        'Turn off tool approvals? Most tool actions will run without asking. '
+                        + 'Shell commands, Python execution, deletes, and git writes still always require approval.'
+                    );
+                    if (!ok) {
+                        await loadSettings();
+                        return;
+                    }
+                    payload.confirm_disable_approvals = true;
+                }
                 await saveSettings(
-                    {
-                        require_tool_approvals: enabled,
-                    },
+                    payload,
                     {
                         successMessage: `Tool approvals ${enabled ? 'enabled' : 'disabled'}.`,
                         busyLabel: 'Saving...',

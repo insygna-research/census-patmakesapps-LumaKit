@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core.paths import get_display_path, get_repo_root
+from core.paths import ensure_tool_path_allowed, get_display_path, get_repo_root
 
 
 def get_move_path_tool():
@@ -37,8 +37,8 @@ def _resolve_path(raw: str) -> Path:
     """Resolve a path relative to the repo root. No fuzzy matching."""
     p = Path(raw.strip())
     if p.is_absolute():
-        return p.resolve()
-    return (get_repo_root() / p).resolve()
+        return ensure_tool_path_allowed(p.resolve())
+    return ensure_tool_path_allowed((get_repo_root() / p).resolve())
 
 
 def _move_path(inputs):

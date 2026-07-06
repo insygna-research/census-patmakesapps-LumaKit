@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.diffs import build_unified_diff, detect_line_ending, normalize_line_endings
-from core.paths import get_display_path, get_repo_root
+from core.paths import ensure_tool_path_allowed, get_display_path, get_repo_root
 
 
 @dataclass
@@ -120,8 +120,8 @@ def _resolve_patch_path(path: str | None) -> Path | None:
         return None
     candidate = Path(path)
     if candidate.is_absolute():
-        return candidate.resolve()
-    return (get_repo_root() / candidate).resolve(strict=False)
+        return ensure_tool_path_allowed(candidate.resolve())
+    return ensure_tool_path_allowed((get_repo_root() / candidate).resolve(strict=False))
 
 
 def _find_sequence(lines: list[str], sequence: list[str], start_index: int) -> int | None:

@@ -2,6 +2,8 @@
  * WebSocket connection manager — connect, reconnect, message routing.
  */
 
+import { wsUrl } from './auth.js';
+
 export class WS {
     constructor(handlers = {}) {
         this.handlers = handlers;
@@ -12,10 +14,7 @@ export class WS {
     }
 
     connect() {
-        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const url = `${protocol}//${location.host}/ws`;
-
-        this.ws = new WebSocket(url);
+        this.ws = new WebSocket(wsUrl('/ws'));
 
         this.ws.onopen = () => {
             this.connected = true;

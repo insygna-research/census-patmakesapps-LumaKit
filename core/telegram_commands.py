@@ -220,6 +220,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         if str(chat_id) == str(OWNER_ID):
             lines.append("/adduser - authorize a new user")
             lines.append("/removeuser - remove an authorized user")
+            lines.append("/role - set a user's tool-access role (trusted/limited)")
             lines.append("/model - choose the owner's Telegram model settings")
             lines.append("/users - list authorized users")
         lines.append("/personality - view or change your Telegram personality override")
@@ -309,7 +310,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         )
         return True
 
-    if cmd in {"/adduser", "/removeuser", "/users", "/model"} and str(chat_id) != str(OWNER_ID):
+    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role"} and str(chat_id) != str(OWNER_ID):
         send_message("This command is owner-only.")
         return True
 
@@ -501,12 +502,48 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         return True
 
     if cmd == "/users" and str(chat_id) == str(OWNER_ID):
+        from core.telegram_user_config import get_user_role
         lines = ["Authorized users:\n"]
         for uid in ALLOWED_IDS:
             name = _get_user_label(uid)
-            tag = " (owner)" if uid == str(OWNER_ID) else ""
+            tag = " (owner)" if uid == str(OWNER_ID) else f" ({get_user_role(uid)})"
             lines.append(f"- {name}{tag} (id: {uid})")
         send_message("\n".join(lines))
+        return True
+
+    if cmd == "/role" and str(chat_id) == str(OWNER_ID):
+        from core.telegram_user_config import get_user_role, set_user_role
+        others = [uid for uid in ALLOWED_IDS if uid != str(OWNER_ID)]
+        if not others:
+            send_message("No non-owner users yet. Roles only apply to other authorized users.")
+            return True
+        lines = ["Whose role do you want to change?\n"]
+        for i, uid in enumerate(others, 1):
+            lines.append(f"{i}. {_get_user_label(uid)} — currently {get_user_role(uid)} (id: {uid})")
+        lines.append(
+            "\nReply with '<number> trusted' or '<number> limited', or 'cancel'."
+            "\n- trusted: full chat, no shell/python/file-write/git/task tools"
+            "\n- limited: trusted minus browser automation and email"
+        )
+        send_message("\n".join(lines))
+
+        reply, _ = poll_for_reply(chat_id)
+        normalized = reply.strip().lower()
+        if normalized in ("cancel", "c", "n", "no"):
+            send_message("Cancelled.")
+            return True
+        parts = normalized.split()
+        if len(parts) == 2 and parts[1] in ("trusted", "limited"):
+            try:
+                pick = int(parts[0]) - 1
+            except ValueError:
+                pick = -1
+            if 0 <= pick < len(others):
+                target = others[pick]
+                new_role = set_user_role(target, parts[1])
+                send_message(f"{_get_user_label(target)} is now '{new_role}'.")
+                return True
+        send_message("Invalid input. Use '<number> trusted' or '<number> limited'.")
         return True
 
     if cmd == "/removeuser" and str(chat_id) == str(OWNER_ID):

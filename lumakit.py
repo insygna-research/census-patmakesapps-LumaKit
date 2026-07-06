@@ -35,6 +35,7 @@ import uvicorn  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from core.paths import get_data_dir  # noqa: E402
+from core import web_auth  # noqa: E402
 from core.service import LumaKitService  # noqa: E402
 from surfaces import telegram as telegram_surface  # noqa: E402
 from surfaces import web as web_surface  # noqa: E402
@@ -162,8 +163,11 @@ def _health_url(port: int | None = None) -> str:
 
 def _health_check(port: int | None = None, *, timeout: float = 1.5) -> dict | None:
     url = _health_url(port)
+    request = urllib.request.Request(
+        url, headers={"X-LumaKit-Token": web_auth.get_session_token()}
+    )
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
         return None
@@ -183,13 +187,15 @@ def _wait_for_health(*, timeout: float = 30.0, port: int | None = None) -> dict 
 
 
 def _open_browser(url: str) -> None:
+    # Inject the session token so the local one-click flow needs no manual auth.
+    target = web_auth.tokenized_url(url)
     opened = False
     try:
-        opened = webbrowser.open(url)
+        opened = webbrowser.open(target)
     except Exception:
         opened = False
     if not opened:
-        print(f"Open {url} in your browser.")
+        print(f"Open {target} in your browser.")
 
 
 def _stale_runtime_cleanup() -> None:
@@ -643,7 +649,7 @@ def command_serve(args) -> int:
 
     config = uvicorn.Config(
         web_surface.app,
-        host="0.0.0.0",
+        host=web_auth.resolve_bind_host(),
         port=web_surface.PORT,
         log_level="warning",
     )

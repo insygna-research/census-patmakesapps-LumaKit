@@ -10,7 +10,12 @@ from core.paths import get_repo_root
 def get_execute_python_tool():
     return {
         'name': 'execute_python',
-        'description': 'Executes Python code in a sandboxed environment and returns the output',
+        'description': (
+            'Executes Python code as the local user and returns the output. '
+            'NOT sandboxed: the code has the same filesystem and network access '
+            'as LumaKit itself, so every call requires user approval. '
+            '10 second time limit.'
+        ),
         'inputSchema': {
             'type': 'object',
             'properties': {

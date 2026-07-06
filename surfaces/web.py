@@ -25,13 +25,14 @@ if _user_env.exists():
     load_dotenv(_user_env)
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from agent import Agent, timestamp_message
 from core import auth as _auth
+from core import web_auth
 from core import email_draft_store
 from core.chat_store import (
     delete_chat,
@@ -68,6 +69,26 @@ WEB_URL = f"http://localhost:{PORT}"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 
 app = FastAPI(title="LumaKit")
+
+
+@app.middleware("http")
+async def _require_session_token(request: Request, call_next):
+    """Every /api/* route requires the per-install session token (S-1)."""
+    if request.url.path.startswith("/api/"):
+        token = request.headers.get("x-lumakit-token") or request.query_params.get("token")
+        if not web_auth.is_valid_token(token):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+async def _authorize_websocket(ws: WebSocket) -> bool:
+    """Reject a WebSocket handshake without a valid token or from a foreign
+    Origin. Called before accept(); closing here refuses the upgrade."""
+    token = ws.query_params.get("token") or ws.headers.get("x-lumakit-token")
+    if web_auth.is_valid_token(token) and web_auth.origin_allowed(ws.headers.get("origin")):
+        return True
+    await ws.close(code=1008)
+    return False
 
 
 def _default_workspace() -> Path:
@@ -217,14 +238,19 @@ app.mount("/media", StaticFiles(directory=str(WEB_MEDIA_DIR)), name="media")
 
 
 def _env_runtime_defaults():
+    from core.providers import default_fallback_model, default_model
     return {
-        "primary_model": str(os.getenv("OLLAMA_MODEL", "") or "").strip(),
-        "fallback_model": str(os.getenv("OLLAMA_FALLBACK_MODEL", "") or "").strip(),
+        "primary_model": default_model(),
+        "fallback_model": default_fallback_model(),
         "local_model": str(os.getenv("OLLAMA_LOCAL_MODEL", "") or "").strip(),
     }
 
 
 def _discover_ollama_models():
+    from core.providers import resolve_provider_name
+    if resolve_provider_name() != "ollama":
+        # Remote providers have no local model registry to enumerate.
+        return [], None
     try:
         payload = OllamaClient(request_timeout=10).tags(request_timeout=10)
         models = payload.get("models", []) if isinstance(payload, dict) else []
@@ -241,6 +267,7 @@ def _discover_ollama_models():
 
 
 def _settings_payload():
+    from core.providers import api_key_is_set, resolve_provider_name
     env_cfg = _env_runtime_defaults()
     effective = get_effective_config_for_user(WEB_USER_ID)
     app_cfg = get_app_runtime_config()
@@ -248,7 +275,11 @@ def _settings_payload():
     setup_required = not bool(effective.get("primary_model"))
     primary_source = "app override" if app_cfg.get("primary_model") else ".env default"
     fallback_source = "app override" if app_cfg.get("fallback_model") else ".env default"
+    provider = resolve_provider_name()
     return {
+        "llm_provider": provider,
+        # Never echo the key itself — only whether one is configured.
+        "api_key_set": api_key_is_set(provider),
         "model": effective.get("primary_model", ""),
         "fallback_model": effective.get("fallback_model", ""),
         "model_source": primary_source,
@@ -446,11 +477,41 @@ async def api_update_settings(payload: dict):
         app_cfg.get("require_tool_approvals", True),
     )
 
+    # Turning approvals OFF weakens a security control — require an explicit
+    # second acknowledgement flag so it can't happen from a casual/accidental
+    # (or scripted) settings write (S-3). Protected tools still confirm
+    # regardless of this toggle (S-4).
+    currently_required = bool(app_cfg.get("require_tool_approvals", True))
+    if currently_required and not bool(require_tool_approvals):
+        if not payload.get("confirm_disable_approvals"):
+            return JSONResponse(
+                {
+                    "error": (
+                        "Disabling tool approvals requires "
+                        "confirm_disable_approvals=true."
+                    )
+                },
+                status_code=400,
+            )
+
+    # Provider selection + API key (server-side only; never echoed back).
+    from core.providers import VALID_PROVIDERS, save_api_key
+
+    llm_provider = str(
+        payload.get("llm_provider", app_cfg.get("llm_provider", "")) or ""
+    ).strip().lower()
+    if llm_provider and llm_provider not in VALID_PROVIDERS:
+        return JSONResponse({"error": f"unknown provider: {llm_provider}"}, status_code=400)
+    api_key = str(payload.get("llm_api_key", "") or "").strip()
+    if api_key:
+        save_api_key(api_key)
+
     save_app_runtime_config(
         {
             "primary_model": primary_model,
             "fallback_model": fallback_model,
             "require_tool_approvals": require_tool_approvals,
+            "llm_provider": llm_provider,
         }
     )
     return _settings_payload()
@@ -729,11 +790,16 @@ def register_surface(service: LumaKitService, *, is_owner: bool = True) -> None:
     ))
 
 
-def run_server(*, host: str = "0.0.0.0", port: int = PORT, log_level: str = "warning") -> None:
-    """Run the FastAPI server for the web surface."""
+def run_server(*, host: str | None = None, port: int = PORT, log_level: str = "warning") -> None:
+    """Run the FastAPI server for the web surface.
+
+    Binds loopback by default; set LUMAKIT_BIND_HOST to expose it (auth stays
+    mandatory either way).
+    """
+    bind_host = host or web_auth.resolve_bind_host()
     print(f"\n=== LumaKit Web UI ===")
-    print(f"Open http://localhost:{port} in your browser\n")
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    print(f"Open {web_auth.tokenized_url(f'http://localhost:{port}')} in your browser\n")
+    uvicorn.run(app, host=bind_host, port=port, log_level=log_level)
 
 
 def _make_agent(ws_id: int, send_fn):
@@ -803,10 +869,28 @@ def _make_agent(ws_id: int, send_fn):
             ctx["diff"] = diff_text
 
     # --- Confirm goes through WebSocket with rich context ---
+    def _await_confirm(payload: dict) -> bool:
+        """Send a confirm request and block until the client replies.
+
+        Fails CLOSED: a missing confirm event, a timeout, or any ambiguity is
+        a denial — never a silent approval (S-4).
+        """
+        event = _ws_confirm_events.get(ws_id)
+        if not event:
+            return False
+        # Drop any stale result/signal from a previous confirm before asking.
+        event.clear()
+        _ws_confirm_results.pop(ws_id, None)
+        send_fn(payload)
+        answered = event.wait(timeout=300)
+        event.clear()
+        if not answered:
+            return False
+        return bool(_ws_confirm_results.get(ws_id, False))
+
     def ws_confirm(prompt):
-        """Send a confirm request over WebSocket, block until client replies."""
         ctx = _ws_tool_ctx.get(ws_id) or {}
-        send_fn({
+        return _await_confirm({
             "type": "confirm",
             "prompt": prompt,
             "tool_name": ctx.get("tool_name"),
@@ -815,16 +899,10 @@ def _make_agent(ws_id: int, send_fn):
             "path": ctx.get("path"),
             "diff": ctx.get("diff"),
         })
-        event = _ws_confirm_events.get(ws_id)
-        if event:
-            event.wait(timeout=300)
-            event.clear()
-            return _ws_confirm_results.get(ws_id, False)
-        return True  # default to allow if something goes wrong
 
     def ws_confirm_email(preview, prompt=None):
         ctx = _ws_tool_ctx.get(ws_id) or {}
-        send_fn({
+        return _await_confirm({
             "type": "confirm",
             "kind": "email",
             "prompt": prompt or "Approve this email?",
@@ -835,12 +913,6 @@ def _make_agent(ws_id: int, send_fn):
             "diff": ctx.get("diff"),
             "email_preview": preview,
         })
-        event = _ws_confirm_events.get(ws_id)
-        if event:
-            event.wait(timeout=300)
-            event.clear()
-            return _ws_confirm_results.get(ws_id, False)
-        return True
 
     def ws_stream_delta(chunk):
         send_fn({"type": "stream_delta", "text": chunk})
@@ -876,6 +948,8 @@ def _make_agent(ws_id: int, send_fn):
 
 @app.websocket("/ws")
 async def websocket_chat(ws: WebSocket):
+    if not await _authorize_websocket(ws):
+        return
     await ws.accept()
     ws_id = id(ws)
     loop = asyncio.get_event_loop()
@@ -1229,6 +1303,8 @@ async def websocket_chat(ws: WebSocket):
 
 @app.websocket("/ws/tasks")
 async def websocket_tasks(ws: WebSocket):
+    if not await _authorize_websocket(ws):
+        return
     await ws.accept()
     _ensure_task_ws_subscribed()
     loop = asyncio.get_event_loop()

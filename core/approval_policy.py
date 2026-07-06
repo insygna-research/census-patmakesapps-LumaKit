@@ -1,0 +1,185 @@
+"""Single source of truth for which tools always require user approval.
+
+Both the interactive agent (agent.py) and the autonomous task runner
+(core/task_runner.py) import from here so the security policy cannot drift
+between them.
+
+Two distinct policies:
+
+- Interactive surfaces (web/CLI/Telegram): tools in ALWAYS_CONFIRM_TOOLS
+  prompt for approval even when the global ``require_tool_approvals`` toggle
+  is off. Arbitrary-execution tools are unconditionally included — a denylist
+  of "dangerous commands" is unwinnable, so the approval prompt is the
+  control, not command matching.
+
+- Autonomous tasks (no human present to prompt): tools in
+  AUTONOMOUS_REFUSED_TOOLS are refused outright. Shell/python execution is
+  currently allowed inside tasks but screened by PROTECTED_SHELL_COMMAND_RE;
+  the planned cross-surface approval round-trip will replace that screen with
+  a real remote approval gate.
+"""
+
+from __future__ import annotations
+
+import re
+
+# Tools that must never run without an explicit human approval, regardless of
+# the global require_tool_approvals setting (S-4).
+ALWAYS_CONFIRM_TOOLS = frozenset({
+    "delete_file",
+    "git_add",
+    "git_commit",
+    "git_push",
+    "execute_shell",
+    "execute_python",
+    "run_command",
+})
+
+# Tools an autonomous task may never execute (it has no way to ask).
+AUTONOMOUS_REFUSED_TOOLS = frozenset({
+    "delete_file",
+    "git_add",
+    "git_commit",
+    "git_push",
+})
+
+# Screens shell commands issued from inside autonomous tasks. This is a
+# best-effort filter, not a security boundary — interactive runs rely on the
+# unconditional approval prompt instead.
+PROTECTED_SHELL_COMMAND_RE = re.compile(
+    r"\bgit\s+(add|commit|push)\b|\b(rm|del|erase|unlink)\b",
+    re.IGNORECASE,
+)
+
+# Tools that accept a raw command string worth screening.
+_COMMAND_TOOLS = {"execute_shell", "run_command"}
+
+
+def command_text_from_inputs(tool_inputs: dict) -> str:
+    command = str(tool_inputs.get("command", "") or "")
+    if not command and isinstance(tool_inputs.get("args"), list):
+        command = " ".join(str(part) for part in tool_inputs.get("args", []))
+    return command
+
+
+def tool_always_requires_approval(tool_name: str, tool_inputs: dict) -> bool:
+    """Interactive-surface policy: does this call prompt even with approvals off?"""
+    if tool_name in ALWAYS_CONFIRM_TOOLS:
+        return True
+    if tool_name in _COMMAND_TOOLS:
+        return bool(PROTECTED_SHELL_COMMAND_RE.search(command_text_from_inputs(tool_inputs)))
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Per-user tool scoping on shared surfaces (S-6).
+#
+# Telegram allows multiple chat IDs; only the owner should reach tools that
+# execute code, mutate the repo, or touch secrets. Roles:
+#   owner   — everything (the first TELEGRAM_ALLOWED_IDS / auth owner)
+#   trusted — default for other allowed users; no execution/mutation tools
+#   limited — trusted minus browser automation and task creation
+# ---------------------------------------------------------------------------
+
+ROLE_OWNER = "owner"
+ROLE_TRUSTED = "trusted"
+ROLE_LIMITED = "limited"
+VALID_ROLES = (ROLE_OWNER, ROLE_TRUSTED, ROLE_LIMITED)
+
+OWNER_ONLY_TOOLS = frozenset({
+    # arbitrary execution
+    "execute_shell",
+    "execute_python",
+    "run_command",
+    "stop_background_command",
+    # repo mutation
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "apply_patch",
+    "move_path",
+    "set_workspace",
+    # git writes
+    "git_init",
+    "git_add",
+    "git_commit",
+    "git_push",
+    "git_pull",
+    "git_branch",
+    # system control / destructive maintenance
+    "reboot_system",
+    "restart_service",
+    "clear_storage",
+    # secrets manager
+    "lumalok_list_secrets",
+    "lumalok_get_secret",
+    "lumalok_add_secret",
+    "lumalok_update_secret",
+    # tasks run autonomously with broader powers — creating/deleting them is
+    # an escalation path for non-owners
+    "create_task",
+    "delete_task",
+})
+
+LIMITED_DENIED_TOOLS = OWNER_ONLY_TOOLS | frozenset({
+    "browser_automation",
+    "browse",
+    "instagram_session",
+    "email_send",
+    "email_reply",
+})
+
+
+def denied_tools_for_role(role: str) -> frozenset[str]:
+    role = str(role or "").strip().lower()
+    if role == ROLE_OWNER:
+        return frozenset()
+    if role == ROLE_LIMITED:
+        return LIMITED_DENIED_TOOLS
+    return OWNER_ONLY_TOOLS
+
+
+def active_surface_denied_tools() -> frozenset[str]:
+    """Tools the current per-turn user may not use.
+
+    Enforced only on shared surfaces (Telegram today). Web and CLI are
+    single-user owner surfaces and stay unrestricted here.
+    """
+    from core import auth
+    from core.interface_context import get_interface
+
+    if get_interface() != "telegram":
+        return frozenset()
+    if auth.is_owner_active():
+        return frozenset()
+    from core.telegram_user_config import get_user_role
+
+    return denied_tools_for_role(get_user_role(auth.get_active_user()))
+
+
+def surface_tool_denial(tool_name: str) -> str | None:
+    """Return a refusal message if the current user's role blocks this tool."""
+    if tool_name in active_surface_denied_tools():
+        return (
+            f"'{tool_name}' is not permitted for your role. Ask the owner to "
+            "run this, or to change your role with /role."
+        )
+    return None
+
+
+def autonomous_tool_refusal(tool_name: str | None, tool_inputs: dict) -> str | None:
+    """Task-runner policy: return a refusal message if this call may not run
+    inside an autonomous task, else None."""
+    if tool_name in AUTONOMOUS_REFUSED_TOOLS:
+        return (
+            f"{tool_name} requires explicit user approval and cannot run "
+            "inside an autonomous task."
+        )
+    if tool_name in _COMMAND_TOOLS and PROTECTED_SHELL_COMMAND_RE.search(
+        command_text_from_inputs(tool_inputs)
+    ):
+        return (
+            f"{tool_name} requires explicit user approval and cannot run "
+            "inside an autonomous task."
+        )
+    return None

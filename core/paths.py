@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -8,6 +9,61 @@ from pathlib import Path
 _data_dir: Path | None = None
 _migration_done = False
 _workspace_root: ContextVar[Path | None] = ContextVar("lumakit_workspace_root", default=None)
+
+# File names that tools must never read/write even inside the workspace —
+# they hold credentials (S-2/S-7).
+_DENYLISTED_NAMES = {".env", "config.env", ".git-credentials", "web_session_token"}
+
+
+def _allowed_external_roots() -> list[Path]:
+    """Extra roots the user has explicitly opened up via LUMAKIT_ALLOW_PATHS
+    (os.pathsep-separated). Off by default."""
+    raw = str(os.getenv("LUMAKIT_ALLOW_PATHS", "") or "").strip()
+    roots = []
+    for item in raw.split(os.pathsep):
+        item = item.strip()
+        if item:
+            roots.append(Path(item).expanduser().resolve(strict=False))
+    return roots
+
+
+def _is_denied_path(resolved: Path) -> bool:
+    if resolved.name.lower() in _DENYLISTED_NAMES:
+        return True
+    # The whole user data dir (~/.lumakit/) holds tokens and config secrets.
+    data_dir = (Path.home() / ".lumakit").resolve(strict=False)
+    if resolved == data_dir or data_dir in resolved.parents:
+        return True
+    # Git config/credential files can embed remote credentials.
+    if resolved.parent.name == ".git" and resolved.name.lower() in {"config", "credentials"}:
+        return True
+    return False
+
+
+def ensure_tool_path_allowed(path: Path) -> Path:
+    """Enforce the filesystem sandbox for tool-facing path resolution.
+
+    Tools may only touch paths inside the current workspace root (or roots
+    explicitly allowed via LUMAKIT_ALLOW_PATHS), and never denylisted secret
+    files. Raises PermissionError with a model-correctable message.
+    """
+    resolved = path.resolve(strict=False)
+    if _is_denied_path(resolved):
+        raise PermissionError(
+            f"Access to '{resolved.name}' is blocked: this path can contain "
+            "secrets and is never accessible to tools."
+        )
+    root = get_repo_root().resolve(strict=False)
+    if resolved == root or resolved.is_relative_to(root):
+        return path
+    for allowed in _allowed_external_roots():
+        if resolved == allowed or resolved.is_relative_to(allowed):
+            return path
+    raise PermissionError(
+        f"Path '{resolved}' is outside the workspace '{root}'. Tools can only "
+        "access files inside the workspace (set LUMAKIT_ALLOW_PATHS to allow "
+        "specific extra directories)."
+    )
 
 
 def get_data_dir() -> Path:
@@ -178,7 +234,7 @@ def resolve_repo_path(raw_path: str, *, must_exist: bool = True, kind: str = "fi
 
     for candidate in direct_candidates:
         if candidate.exists() and _matches_kind(candidate, kind):
-            return candidate.resolve()
+            return ensure_tool_path_allowed(candidate.resolve())
 
     scored_matches = []
     for candidate in _iter_repo_paths(kind):
@@ -191,11 +247,11 @@ def resolve_repo_path(raw_path: str, *, must_exist: bool = True, kind: str = "fi
         best_score = scored_matches[0][0]
         best_matches = [path for score, path in scored_matches if score == best_score]
         if len(best_matches) == 1:
-            return best_matches[0]
+            return ensure_tool_path_allowed(best_matches[0])
         options = ", ".join(get_display_path(path) for path in best_matches[:5])
         raise FileNotFoundError(f"Ambiguous path '{raw_path}'. Matches: {options}")
 
     if must_exist:
         raise FileNotFoundError(f"Could not resolve path '{raw_path}' from {root}")
 
-    return direct_candidates[0].resolve(strict=False)
+    return ensure_tool_path_allowed(direct_candidates[0].resolve(strict=False))
