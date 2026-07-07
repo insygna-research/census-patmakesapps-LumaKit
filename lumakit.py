@@ -225,16 +225,22 @@ def _already_running_state() -> tuple[str, dict | None]:
     return "", None
 
 
-def _spawn_daemon(*, verbose: bool = False) -> None:
+def _spawn_daemon(*, verbose: bool = False) -> int:
+    """Spawn a detached `lumakit serve` daemon; returns the child pid."""
     cmd = [sys.executable, "-m", "lumakit", "serve"]
     if verbose:
         cmd.append("--verbose")
+
+    # Unbuffered so the child's startup banner reaches the daemon log live
+    # instead of sitting in a block buffer while the process runs.
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
 
     with DAEMON_LOG_FILE.open("a", encoding="utf-8") as log_file:
         kwargs = {
             "cwd": str(REPO_ROOT),
             "stdout": log_file,
             "stderr": log_file,
+            "env": env,
         }
         if os.name == "nt":
             # Fully detach. Terminals, IDEs, and CI runners often place child
@@ -244,12 +250,13 @@ def _spawn_daemon(*, verbose: bool = False) -> None:
             flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
             CREATE_BREAKAWAY_FROM_JOB = 0x01000000
             try:
-                subprocess.Popen(cmd, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+                child = subprocess.Popen(cmd, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
             except OSError:
                 # The current job forbids breakaway — detach as far as allowed.
-                subprocess.Popen(cmd, creationflags=flags, **kwargs)
-            return
-        subprocess.Popen(cmd, start_new_session=True, **kwargs)
+                child = subprocess.Popen(cmd, creationflags=flags, **kwargs)
+            return child.pid
+        child = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+        return child.pid
 
 
 def _render_systemd_service(
@@ -709,18 +716,29 @@ def command_serve(args) -> int:
         # at birth by Job-object teardown on Windows) and retry once.
         print("Restart requested — relaunching LumaKit in the background...")
         for attempt in (1, 2):
-            _spawn_daemon(verbose=args.verbose)
-            deadline = time.time() + 20
+            child_pid = _spawn_daemon(verbose=args.verbose)
+            child_died = False
+            deadline = time.time() + 90
             while time.time() < deadline:
                 state = _runtime_state()
                 pid = (state or {}).get("pid")
                 if pid and pid != os.getpid() and _pid_running(pid):
                     print(f"Relaunched LumaKit (pid {pid}).")
                     return 0
+                if not _pid_running(child_pid):
+                    print(f"Respawn attempt {attempt}: child (pid {child_pid}) died during startup.")
+                    child_died = True
+                    break
                 time.sleep(0.5)
-            print(f"Respawn attempt {attempt} did not come up within 20s.")
-        print("RESTART FAILED: the relaunched process never became healthy. "
-              "Start manually with `lumakit open`.")
+            if not child_died:
+                # Alive but slow (cold start / AV scan): let it finish booting.
+                # Never spawn a second daemon next to a live one — the loser
+                # of the port race would come up on a different port.
+                print(f"Respawn (pid {child_pid}) is still starting after 90s — "
+                      "leaving it to finish. Check `lumakit status`.")
+                return 0
+        print("RESTART FAILED: the relaunched process died twice during startup. "
+              f"Check {DAEMON_LOG_FILE}, then start manually with `lumakit open`.")
 
     return 0
 

@@ -2099,7 +2099,9 @@ async function saveSettings(payload, { successMessage = 'Model settings saved.',
 // /api/health until the new process is up, then reload the page.
 
 const RESTART_POLL_INTERVAL_MS = 1000;
-const RESTART_TIMEOUT_MS = 45000;
+// Generous on purpose: a cold Python start on a busy machine (antivirus
+// scan, cloud-synced folder) can take well over a minute.
+const RESTART_TIMEOUT_MS = 120000;
 
 async function performBackendRestart() {
     const progress = showProgressDialog({
@@ -2128,14 +2130,18 @@ async function performBackendRestart() {
         return;
     }
 
-    progress.update({ body: 'Backend is restarting — waiting for it to come back online...' });
-
     // Give the old process a moment to actually go down before polling,
     // so we don't mistake its final responses for the new process.
     await new Promise(resolve => setTimeout(resolve, 2500));
 
-    const deadline = Date.now() + RESTART_TIMEOUT_MS;
+    const startedAt = Date.now();
+    const deadline = startedAt + RESTART_TIMEOUT_MS;
     while (Date.now() < deadline) {
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        progress.update({
+            body: `Waiting for the backend to come back online... (${elapsed}s — `
+                + 'usually under 30 seconds, up to a couple of minutes on a cold start)',
+        });
         try {
             const res = await fetch('/api/health');
             if (res.ok) {
@@ -2155,9 +2161,10 @@ async function performBackendRestart() {
 
     progress.close();
     await showAlertDialog({
-        title: "LumaKit didn't come back up",
-        body: 'The backend restarted but never became healthy on this address. '
-            + 'From a terminal, run `lumakit open` to start it again (it may have moved to a different port).',
+        title: 'Still restarting...',
+        body: 'The backend has not come back after 2 minutes. It may still be starting — '
+            + 'wait a moment and reload this page. If it stays offline, run `lumakit status` '
+            + 'and then `lumakit open` from a terminal.',
     });
 }
 
