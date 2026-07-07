@@ -21,7 +21,7 @@ LumaKit gives a model real tools: shell execution, repository work, web search, 
 
 - **Durable autonomous tasks.** A persistent task runner drives jobs for hours or days, keeps its own todo list, survives restarts, and refuses to fake completion.
 - **Real observability.** A web UI that shows live tool activity, diff previews before writes, approval prompts, and screenshots — you *watch it work*, not just chat with it.
-- **Safe autonomy.** Token-gated server, filesystem sandbox, fail-closed confirmations, and approvals on shell/git/delete that can't be toggled away. See [Security model](#security-model).
+- **Safe autonomy.** Token-gated server, filesystem sandbox, fail-closed confirmations, and approvals on shell/git/delete that can't be toggled away — a background task that hits a risky step pauses and asks your phone. See [Security model](#security-model).
 - **Bring any model.** One config switch between Anthropic (Claude), OpenAI (GPT), xAI (Grok), and local Ollama — local stays the privacy option, not a requirement.
 - **Real launcher flow.** `lumakit open` starts or reuses the backend and opens the UI; Linux gets an app-menu launcher, Windows gets Desktop/Start Menu shortcuts.
 
@@ -119,7 +119,7 @@ How to choose:
 
 - **Strongest first impression:** a hosted frontier model (Claude/GPT/Grok) gives instant high-quality tool use with zero local setup.
 - **Fully local/private:** run Ollama and point `OLLAMA_MODEL` at a pulled model — nothing leaves your machine. The old `OLLAMA_*` variables keep working unchanged.
-- **Switch anytime:** the web UI Settings view picks the provider, stores the API key server-side (never echoed back), persists primary/fallback model overrides, and lists detected Ollama models. Telegram owners can still override their runtime model with `/model`.
+- **Switch anytime, no restart:** the Settings provider card picks the provider, the model (remembered *per provider* — your Claude choice survives a week on Grok), an optional fallback, and the API key (stored server-side, never echoed back). Changes apply to the next message and the next task round immediately. On Ollama the model field autocompletes from your pulled models. Telegram owners can still override their runtime model with `/model`.
 
 ## Install
 
@@ -254,16 +254,19 @@ The web UI can already:
 
 - chat with the agent
 - show live tool activity
-- handle approval flows
+- handle approval flows, including approving/denying a paused background task
 - display screenshots and inline media
-- expose runtime model settings
+- pick the provider and model (per-provider memory, applied live — no restart)
+- detect when `.env` was edited after startup and restart the backend in one click
 - block first-run use until a model is selected when nothing is configured
 
 ## Core features
 
 - **Tool-calling agent** with multi-round tool loops
-- **Multi-provider model layer** — Claude, GPT, Grok, or local Ollama behind one interface
-- **Autonomous task runner** with durable persisted state (WAL SQLite, append-only history) and follow-up notifications
+- **Multi-provider model layer** — Claude, GPT, Grok, or local Ollama behind one interface, hot-swappable from Settings
+- **Autonomous task runner** with durable persisted state (WAL SQLite, append-only history) — tasks survive backend restarts and resume with full context
+- **Cross-surface task approvals** — a background task that hits a protected action (shell, git write, delete) pauses and pings you; approve or deny from Telegram (`/approve N`) or the web task panel, and approval grants exactly that action, once
+- **Shareable task pages** — every task gets a token-gated `/task/<id>` page with status, result, files changed, todo list, and the full activity timeline; completion pings link to it
 - **Web UI** with chat history, tool activity, approval prompts, tasks, and inline images
 - **Telegram** with multi-user support, reminders, photos, voice, and owner controls
 - **Browser automation** with persistent auth profiles
@@ -288,6 +291,10 @@ LumaKit gives a model real tools — including a shell — so its security postu
 - **Approvals that can't be toggled away.** Shell, Python execution, file deletion, and git
   writes always prompt for approval — even if you turn the general approvals setting off. The
   confirm flow fails closed: a missing or timed-out confirmation is a denial.
+- **Autonomous tasks have the same floor.** A background task that reaches a protected action
+  pauses and asks you (Telegram or web) instead of running it. Approval mints a one-shot grant
+  for exactly that command, with a 60-minute expiry; denial resumes the task with
+  do-not-retry guidance. Every request and grant lands in the task's audit timeline.
 - **Per-user roles on Telegram.** Only the owner can reach execution/repo-write tools; other
   authorized users get `trusted` or `limited` roles (managed with `/role`).
 - **Honest tool descriptions.** `execute_python` says exactly what it is: not sandboxed, runs
@@ -310,16 +317,25 @@ If you want the full always-available agent experience, these docs matter:
 
 What you can do today:
 
-- pick a provider (`ollama`/`anthropic`/`openai`/`xai`) via `.env` or the web UI Settings view
-- set `LLM_MODEL`/`LLM_FALLBACK_MODEL` (or the classic `OLLAMA_*` variables for local)
-- paste an API key in Settings — stored server-side only, never echoed back
+- pick a provider (`ollama`/`anthropic`/`openai`/`xai`) via `.env` or the Settings provider card
+- pick a model per provider in Settings — remembered separately for each provider, applied to
+  the next message and task round with no restart; leave it blank for the provider's default
+- set an optional per-provider fallback model, retried automatically if the primary fails
+- paste an API key in Settings — stored server-side only, never echoed back; keys already in
+  `.env` are detected automatically
+- set `LLM_MODEL`/`LLM_FALLBACK_MODEL` in `.env` as global defaults (or the classic `OLLAMA_*`
+  variables for local)
 - set `OLLAMA_LOCAL_MODEL` as an optional locally-pulled alternative
-- in the web UI Settings view, choose a persisted primary/fallback model override
 - on Telegram, the owner can use `/model` to switch their own runtime preferences
+- if you edit `.env` while LumaKit is running, Settings shows a "Restart needed" banner naming
+  the changed variables, with a one-click **Restart Backend** button
 
 What is **not** shipped yet:
 
-- a richer multi-profile model-management flow beyond the current primary/fallback selection
+- standing approvals for autonomous tasks ("allow git commits for the rest of this task"
+  instead of approving each one) — planned; today every protected action is approved
+  individually
+- model-id validation on save — a typo'd model name fails on the next message, not at save time
 
 ## Why this is ready for launch
 
@@ -330,7 +346,8 @@ The repo now has the pieces a real install actually needs:
 - launcher commands that behave like a real app, plus reopenable shortcuts
 - a first-run provider/model-selection flow instead of a dead-end
 - a hardened security posture: token-gated server, filesystem sandbox, fail-closed approvals
-- a durable task runner backed by WAL SQLite and append-only history
+- a durable task runner backed by WAL SQLite and append-only history, with a cross-surface
+  approval loop and shareable task pages
 - a test suite and CI on every push
 
 ## Documentation map
@@ -342,6 +359,7 @@ The repo now has the pieces a real install actually needs:
 - [Telegram Setup](docs/telegram_setup.md)
 - [Gmail Setup](docs/gmail_setup.md)
 - [Family & Group Alerts](docs/family_alerts.md)
+- [LumaKit vs OpenClaw](docs/vs-openclaw.md)
 
 ## Connect to Lumalok
 
