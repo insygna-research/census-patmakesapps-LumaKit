@@ -270,6 +270,15 @@ async def task_page(task_id: int, request: Request):
             f"<code>{esc(str(pending.get('summary')))}</code></div>"
         )
 
+    files_html = ""
+    if isinstance(constraints, dict) and constraints.get("_files_changed"):
+        files_changed = [str(p) for p in constraints["_files_changed"]]
+        overflow = int(constraints.get("_files_changed_overflow") or 0)
+        items = "".join(f"<li><code>{esc(p)}</code></li>" for p in files_changed)
+        if overflow:
+            items += f"<li class='muted'>+{overflow} more</li>"
+        files_html = f"<h2>Files changed</h2><ul class='todos'>{items}</ul>"
+
     rows = ""
     for entry in (task.get("history") or [])[-120:]:
         kind = esc(str(entry.get("type") or entry.get("kind") or ""))
@@ -314,6 +323,7 @@ async def task_page(task_id: int, request: Request):
 <h2>Goal</h2><pre class="result">{esc(str(task.get('goal') or ''))}</pre>
 {pending_html}
 {result_html}
+{files_html}
 <h2>Todo list</h2><ul class="todos">{todos_html or '<li class="muted">No todo list yet.</li>'}</ul>
 <h2>Activity timeline</h2>
 <table>{rows or '<tr><td class="muted">No activity recorded yet.</td></tr>'}</table>
@@ -363,8 +373,10 @@ def _discover_ollama_models():
 
 
 def _settings_payload():
+    from core import restart
     from core.providers import api_key_is_set, resolve_provider_name
     env_cfg = _env_runtime_defaults()
+    drifted_env_vars = restart.env_drift()
     effective = get_effective_config_for_user(WEB_USER_ID)
     app_cfg = get_app_runtime_config()
     installed_models, model_error = _discover_ollama_models()
@@ -395,6 +407,11 @@ def _settings_payload():
         "setup_required": setup_required,
         "installed_models": installed_models,
         "installed_models_error": model_error,
+        # .env/config.env was edited after the backend started — these vars
+        # (names only, never values) won't apply until a restart (§6.3).
+        "restart_required": bool(drifted_env_vars),
+        "restart_reasons": drifted_env_vars,
+        "restart_supported": restart.restart_supported(),
     }
 
 
@@ -634,6 +651,30 @@ async def api_update_settings(payload: dict):
         }
     )
     return _settings_payload()
+
+
+@app.post("/api/restart")
+async def api_restart():
+    """Gracefully restart the backend (token-gated by the /api middleware).
+
+    Provider/key/config changes only fully apply on a fresh process — the
+    task runner and other surfaces cache their LLM clients, and .env is
+    read once at startup. The serve loop drains connections, then respawns
+    the daemon; the UI polls /api/health until it's back.
+    """
+    from core import restart
+
+    if not restart.schedule_restart():
+        return JSONResponse(
+            {
+                "error": (
+                    "This run mode doesn't support self-restart. "
+                    "Restart manually: lumakit stop, then lumakit open."
+                )
+            },
+            status_code=503,
+        )
+    return {"ok": True, "restarting": True}
 
 
 # ---------------------------------------------------------------------------

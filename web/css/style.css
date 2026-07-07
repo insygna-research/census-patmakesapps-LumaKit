@@ -2636,6 +2636,30 @@ body {
     line-height: 1.5;
 }
 
+.settings-restart-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.settings-restart-banner .settings-btn {
+    flex-shrink: 0;
+}
+
+.settings-restart-banner code {
+    font-size: 12px;
+}
+
+.app-dialog-spinner {
+    display: inline-block;
+    vertical-align: -2px;
+    margin-right: 10px;
+    border-color: rgba(127, 127, 127, 0.3);
+    border-top-color: currentColor;
+}
+
 .settings-error {
     color: var(--error);
     font-size: 13px;

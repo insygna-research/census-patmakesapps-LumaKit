@@ -660,6 +660,12 @@ def command_serve(args) -> int:
         stop_event.set()
         server.should_exit = True
 
+    # Lets the token-gated POST /api/restart begin a graceful shutdown; the
+    # finally block below respawns the daemon once the server has drained.
+    from core import restart as _restart
+
+    _restart.register_shutdown_hook(request_shutdown)
+
     previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGINT, request_shutdown)
@@ -682,6 +688,13 @@ def command_serve(args) -> int:
         _clear_runtime_state(pid=os.getpid())
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
+
+    if _restart.restart_requested():
+        # Requested via /api/restart: relaunch as a background daemon now
+        # that the port and runtime state are released. If this process was
+        # a foreground `lumakit serve`, the new one continues detached.
+        print("Restart requested — relaunching LumaKit in the background...")
+        _spawn_daemon(verbose=args.verbose)
 
     return 0
 

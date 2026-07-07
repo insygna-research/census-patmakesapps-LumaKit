@@ -1057,9 +1057,12 @@ const $appDialogCancel = document.getElementById('app-dialog-cancel');
 const $appDialogConfirm = document.getElementById('app-dialog-confirm');
 
 let _appDialogResolver = null;
+// While locked (e.g. mid-restart) the dialog ignores Escape/Enter/backdrop —
+// closing it wouldn't cancel the operation, just hide its progress.
+let _appDialogLocked = false;
 
 function _closeAppDialog(result) {
-    if (!$appDialog) return;
+    if (!$appDialog || _appDialogLocked) return;
     $appDialog.classList.add('hidden');
     const r = _appDialogResolver;
     _appDialogResolver = null;
@@ -1095,6 +1098,32 @@ function showAlertDialog({ title, body, confirmLabel = 'OK' } = {}) {
         $appDialog.classList.remove('hidden');
         setTimeout(() => $appDialogConfirm.focus(), 0);
     });
+}
+
+function showProgressDialog({ title, body } = {}) {
+    // Modal progress state (spinner, no buttons, not dismissable). Returns
+    // handles to update the copy and to release/close the dialog.
+    if (!$appDialog) return { update() {}, close() {} };
+    _appDialogLocked = false;
+    $appDialogTitle.textContent = title || '';
+    $appDialogBody.innerHTML = `<span class="button-spinner app-dialog-spinner" aria-hidden="true"></span><span></span>`;
+    $appDialogBody.lastElementChild.textContent = body || '';
+    $appDialogConfirm.hidden = true;
+    $appDialogCancel.hidden = true;
+    _appDialogResolver = null;
+    _appDialogLocked = true;
+    $appDialog.classList.remove('hidden');
+    return {
+        update({ title: nextTitle, body: nextBody } = {}) {
+            if (nextTitle !== undefined) $appDialogTitle.textContent = nextTitle;
+            if (nextBody !== undefined) $appDialogBody.lastElementChild.textContent = nextBody;
+        },
+        close() {
+            _appDialogLocked = false;
+            $appDialogConfirm.hidden = false;
+            $appDialog.classList.add('hidden');
+        },
+    };
 }
 
 if ($appDialogConfirm) $appDialogConfirm.onclick = () => _closeAppDialog(true);
@@ -1703,6 +1732,19 @@ async function loadSettings() {
         const modelsError = settings.installed_models_error
             ? `<div class="settings-error">Could not load installed models from Ollama: ${escapeHtml(settings.installed_models_error)}</div>`
             : '';
+        const restartBanner = settings.restart_required ? `
+            <div class="settings-banner settings-restart-banner">
+                <div>
+                    <strong>Restart needed.</strong>
+                    Your environment file changed after LumaKit started
+                    (${escapeHtml((settings.restart_reasons || []).join(', '))}).
+                    The new values won't be used until the backend restarts.
+                </div>
+                ${settings.restart_supported !== false
+                    ? '<button type="button" id="restart-backend-btn" class="settings-btn primary">Restart Backend</button>'
+                    : '<div class="settings-subgroup-hint">From a terminal, run <code>lumakit stop</code>, then <code>lumakit open</code>.</div>'}
+            </div>
+        ` : '';
         const approvalsOn = !!settings.require_tool_approvals;
         const approvalStateLabel = approvalsOn ? 'On' : 'Off';
 
@@ -1717,6 +1759,7 @@ async function loadSettings() {
 
         $settingsContent.innerHTML = `
             ${banner}
+            ${restartBanner}
             <div class="settings-card">
                 <h3>Model Provider</h3>
                 <div class="settings-note">
@@ -1870,13 +1913,34 @@ async function loadSettings() {
 
         $providerForm?.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const payload = { llm_provider: $providerSelect?.value || 'ollama' };
+            const selectedProvider = $providerSelect?.value || 'ollama';
+            const providerChanged = selectedProvider !== provider;
+            const payload = { llm_provider: selectedProvider };
             const key = ($apiKeyInput?.value || '').trim();
             if (key) payload.llm_api_key = key;
-            await saveSettings(payload, {
+            const saved = await saveSettings(payload, {
                 successMessage: 'Provider settings saved. New chats use the new provider.',
                 busyLabel: 'Saving...',
             });
+            if (saved && (providerChanged || key)) {
+                await offerBackendRestart({
+                    title: 'Restart to apply everywhere?',
+                    body: 'Your provider settings are saved and new chats already use them, '
+                        + 'but background tasks and other surfaces keep the previous configuration '
+                        + 'until LumaKit restarts.',
+                });
+            }
+        });
+
+        document.getElementById('restart-backend-btn')?.addEventListener('click', async () => {
+            const ok = await showConfirmDialog({
+                title: 'Restart LumaKit?',
+                body: 'The backend will restart to pick up your environment changes. '
+                    + 'This takes a few seconds; the app reloads automatically when it\'s back.',
+                confirmLabel: 'Restart now',
+                cancelLabel: 'Cancel',
+            });
+            if (ok) await performBackendRestart();
         });
 
         if (pendingSettingsFocus) {
@@ -1916,10 +1980,13 @@ async function loadSettings() {
                 const enabled = input.value === 'on';
                 const payload = { require_tool_approvals: enabled };
                 if (!enabled) {
-                    const ok = window.confirm(
-                        'Turn off tool approvals? Most tool actions will run without asking. '
-                        + 'Shell commands, Python execution, deletes, and git writes still always require approval.'
-                    );
+                    const ok = await showConfirmDialog({
+                        title: 'Turn off tool approvals?',
+                        body: 'Most tool actions will run without asking. Shell commands, Python '
+                            + 'execution, deletes, and git writes still always require approval.',
+                        confirmLabel: 'Turn off',
+                        danger: true,
+                    });
                     if (!ok) {
                         await loadSettings();
                         return;
@@ -2016,11 +2083,100 @@ async function saveSettings(payload, { successMessage = 'Model settings saved.',
         await loadSettings();
         await loadHealth();
         showSettingsNotice('success', successMessage);
+        return true;
     } catch (e) {
         loadSettingsError('Failed to save settings.');
+        return false;
     } finally {
         setSettingsBusy(false);
     }
+}
+
+// --- Backend restart (§6.3: restart-required notice) ---
+// The backend reads .env once at startup and long-lived surfaces cache their
+// LLM clients, so provider/key/config changes only fully apply on a fresh
+// process. This drives the one-click restart: POST /api/restart, watch
+// /api/health until the new process is up, then reload the page.
+
+const RESTART_POLL_INTERVAL_MS = 1000;
+const RESTART_TIMEOUT_MS = 45000;
+
+async function performBackendRestart() {
+    const progress = showProgressDialog({
+        title: 'Restarting LumaKit',
+        body: 'Asking the backend to restart...',
+    });
+
+    try {
+        const res = await fetch('/api/restart', { method: 'POST' });
+        if (!res.ok) {
+            const detail = await res.json().catch(() => ({}));
+            progress.close();
+            await showAlertDialog({
+                title: 'Restart not available',
+                body: detail.error
+                    || 'The backend could not restart itself. From a terminal, run `lumakit stop`, then `lumakit open`.',
+            });
+            return;
+        }
+    } catch (e) {
+        progress.close();
+        await showAlertDialog({
+            title: 'Restart failed',
+            body: 'Could not reach the backend to restart it. From a terminal, run `lumakit stop`, then `lumakit open`.',
+        });
+        return;
+    }
+
+    progress.update({ body: 'Backend is restarting — waiting for it to come back online...' });
+
+    // Give the old process a moment to actually go down before polling,
+    // so we don't mistake its final responses for the new process.
+    await new Promise(resolve => setTimeout(resolve, 2500));
+
+    const deadline = Date.now() + RESTART_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        try {
+            const res = await fetch('/api/health');
+            if (res.ok) {
+                const health = await res.json();
+                if (health && health.status === 'ok') {
+                    progress.update({ title: 'Back online', body: 'Reloading the app...' });
+                    await new Promise(resolve => setTimeout(resolve, 600));
+                    location.reload();
+                    return;
+                }
+            }
+        } catch (e) {
+            // Expected while the backend is down — keep polling.
+        }
+        await new Promise(resolve => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
+    }
+
+    progress.close();
+    await showAlertDialog({
+        title: "LumaKit didn't come back up",
+        body: 'The backend restarted but never became healthy on this address. '
+            + 'From a terminal, run `lumakit open` to start it again (it may have moved to a different port).',
+    });
+}
+
+async function offerBackendRestart({ title, body } = {}) {
+    const restartSupported = settingsState?.restart_supported !== false;
+    if (!restartSupported) {
+        await showAlertDialog({
+            title: title || 'Restart required',
+            body: `${body || ''} From a terminal, run \`lumakit stop\`, then \`lumakit open\`.`.trim(),
+        });
+        return;
+    }
+    const ok = await showConfirmDialog({
+        title: title || 'Restart required',
+        body: `${body || ''} Restart takes a few seconds; running tasks pause and resume automatically.`.trim(),
+        confirmLabel: 'Restart now',
+        cancelLabel: 'Later',
+    });
+    if (ok) await performBackendRestart();
 }
 
 // --- Health check for model badge ---
