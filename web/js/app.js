@@ -1913,23 +1913,13 @@ async function loadSettings() {
 
         $providerForm?.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const selectedProvider = $providerSelect?.value || 'ollama';
-            const providerChanged = selectedProvider !== provider;
-            const payload = { llm_provider: selectedProvider };
+            const payload = { llm_provider: $providerSelect?.value || 'ollama' };
             const key = ($apiKeyInput?.value || '').trim();
             if (key) payload.llm_api_key = key;
-            const saved = await saveSettings(payload, {
-                successMessage: 'Provider settings saved. New chats use the new provider.',
+            await saveSettings(payload, {
+                successMessage: 'Provider saved — active now for chats and background tasks. No restart needed.',
                 busyLabel: 'Saving...',
             });
-            if (saved && (providerChanged || key)) {
-                await offerBackendRestart({
-                    title: 'Restart to apply everywhere?',
-                    body: 'Your provider settings are saved and new chats already use them, '
-                        + 'but background tasks and other surfaces keep the previous configuration '
-                        + 'until LumaKit restarts.',
-                });
-            }
         });
 
         document.getElementById('restart-backend-btn')?.addEventListener('click', async () => {
@@ -2168,23 +2158,6 @@ async function performBackendRestart() {
     });
 }
 
-async function offerBackendRestart({ title, body } = {}) {
-    const restartSupported = settingsState?.restart_supported !== false;
-    if (!restartSupported) {
-        await showAlertDialog({
-            title: title || 'Restart required',
-            body: `${body || ''} From a terminal, run \`lumakit stop\`, then \`lumakit open\`.`.trim(),
-        });
-        return;
-    }
-    const ok = await showConfirmDialog({
-        title: title || 'Restart required',
-        body: `${body || ''} Restart takes a few seconds; running tasks pause and resume automatically.`.trim(),
-        confirmLabel: 'Restart now',
-        cancelLabel: 'Later',
-    });
-    if (ok) await performBackendRestart();
-}
 
 // --- Health check for model badge ---
 async function loadHealth() {

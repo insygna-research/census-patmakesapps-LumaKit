@@ -136,7 +136,12 @@ class Agent:
         # Initialize the LLM provider client (Ollama/Anthropic/OpenAI/xAI).
         # Kept on `self.ollama` for backwards compatibility — every client
         # shares the same chat()/last_model_used surface.
-        from core.providers import create_llm_client, default_fallback_model, default_model
+        from core.providers import (
+            create_llm_client,
+            default_fallback_model,
+            default_model,
+            provider_fingerprint,
+        )
 
         self.default_model = default_model() or None
         self.default_fallback_model = default_fallback_model() or None
@@ -145,6 +150,7 @@ class Agent:
         self.fallback_model = self.default_fallback_model
         self.last_model_used = None
         self.ollama = create_llm_client(fallback_model=self.fallback_model)
+        self._llm_fingerprint = provider_fingerprint()
 
         root = self.workspace_root
 
@@ -553,6 +559,29 @@ class Agent:
         }
         self._system_message_cache[cache_key] = message
         return dict(message)
+
+    def ensure_current_llm_client(self):
+        """Hot-swap the LLM client when provider settings changed.
+
+        Called at the start of every turn (apply_user_runtime), so a
+        provider/key/model change in Settings applies to the very next
+        message on every surface — no backend restart, no reconnect.
+        """
+        from core.providers import (
+            create_llm_client,
+            default_fallback_model,
+            default_model,
+            provider_fingerprint,
+        )
+
+        fingerprint = provider_fingerprint()
+        if getattr(self, "_llm_fingerprint", None) == fingerprint:
+            return
+        self.default_model = default_model() or None
+        self.default_fallback_model = default_fallback_model() or None
+        self.fallback_model = self.default_fallback_model
+        self.ollama = create_llm_client(fallback_model=self.fallback_model)
+        self._llm_fingerprint = fingerprint
 
     def apply_runtime_overrides(self, messages=None, model=None, fallback_model=None,
                                 extra_instructions=None, context_instructions=None):

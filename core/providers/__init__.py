@@ -57,14 +57,50 @@ def resolve_api_key(provider: str | None = None) -> str | None:
     return key or None
 
 
-def default_model() -> str:
-    return str(os.getenv("LLM_MODEL", "") or os.getenv("OLLAMA_MODEL", "") or "").strip()
+# Sensible per-provider defaults so switching providers Just Works without
+# the user hand-typing a model id (LLM_MODEL still overrides everything).
+_PROVIDER_DEFAULT_MODELS = {
+    "anthropic": "claude-opus-4-8",
+    "openai": "gpt-5.2",
+    "xai": "grok-4",
+}
 
 
-def default_fallback_model() -> str:
-    return str(
-        os.getenv("LLM_FALLBACK_MODEL", "") or os.getenv("OLLAMA_FALLBACK_MODEL", "") or ""
-    ).strip()
+def default_model(provider: str | None = None) -> str:
+    explicit = str(os.getenv("LLM_MODEL", "") or "").strip()
+    if explicit:
+        return explicit
+    provider = provider or resolve_provider_name()
+    if provider == "ollama":
+        return str(os.getenv("OLLAMA_MODEL", "") or "").strip()
+    return _PROVIDER_DEFAULT_MODELS.get(provider, "")
+
+
+def default_fallback_model(provider: str | None = None) -> str:
+    explicit = str(os.getenv("LLM_FALLBACK_MODEL", "") or "").strip()
+    if explicit:
+        return explicit
+    provider = provider or resolve_provider_name()
+    if provider == "ollama":
+        # Ollama-only fallback: a local fallback model makes no sense on a
+        # remote provider's API.
+        return str(os.getenv("OLLAMA_FALLBACK_MODEL", "") or "").strip()
+    return ""
+
+
+def provider_fingerprint() -> tuple:
+    """Identity of the resolved provider config. Long-lived holders of a
+    client (interactive agents, the task runner) compare this each turn and
+    rebuild their client when it changes — Settings saves apply immediately,
+    no restart."""
+    provider = resolve_provider_name()
+    return (
+        provider,
+        str(os.getenv("LLM_BASE_URL", "") or "").strip(),
+        resolve_api_key(provider) or "",
+        default_model(provider),
+        default_fallback_model(provider),
+    )
 
 
 def save_api_key(key: str) -> None:

@@ -24,15 +24,12 @@ def get_effective_config_for_user(
     local_model=None,
 ):
     """Return the effective model/runtime config for a user."""
-    env_model = (
-        default_model
-        if default_model is not None
-        else (os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL"))
-    )
+    from core.providers import default_fallback_model as _provider_fallback
+    from core.providers import default_model as _provider_model
+
+    env_model = default_model if default_model is not None else _provider_model()
     default_fallback = (
-        default_fallback
-        if default_fallback is not None
-        else (os.getenv("LLM_FALLBACK_MODEL") or os.getenv("OLLAMA_FALLBACK_MODEL"))
+        default_fallback if default_fallback is not None else _provider_fallback()
     )
     local_model = local_model if local_model is not None else os.getenv("OLLAMA_LOCAL_MODEL", "")
     app_cfg = get_app_runtime_config()
@@ -64,6 +61,11 @@ def get_effective_config_for_user(
 
 def apply_user_runtime(agent, session, user_id, surface=None):
     """Apply the current effective runtime for a user onto the active session."""
+    # Provider settings saved in the UI apply on the next turn: rebuild the
+    # agent's LLM client (and its provider-default models) if they changed.
+    refresh_client = getattr(agent, "ensure_current_llm_client", None)
+    if callable(refresh_client):
+        refresh_client()
     user_cfg = _get_user_config(user_id)
     personality_prompt = user_cfg.get("personality_prompt") or None
     context_instructions = _surface_instructions(surface)

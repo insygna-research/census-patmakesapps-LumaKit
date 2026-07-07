@@ -41,6 +41,71 @@ def test_factory_provider_selection(monkeypatch):
     assert isinstance(providers.create_llm_client(), OllamaClient)
 
 
+def _clean_model_env(monkeypatch):
+    for var in ("LLM_MODEL", "LLM_FALLBACK_MODEL", "LLM_BASE_URL", "LLM_API_KEY",
+                "OLLAMA_MODEL", "OLLAMA_FALLBACK_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_default_model_is_provider_aware(monkeypatch):
+    monkeypatch.setattr("core.app_runtime_config.APP_RUNTIME_CONFIG", {"llm_provider": ""})
+    _clean_model_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_MODEL", "qwen3")
+    monkeypatch.setenv("OLLAMA_FALLBACK_MODEL", "gemma4")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    assert providers.default_model() == "qwen3"
+    assert providers.default_fallback_model() == "gemma4"
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    # switching provider must not send an Ollama model name to a remote API
+    assert providers.default_model() == "claude-opus-4-8"
+    assert providers.default_fallback_model() == ""
+    monkeypatch.setenv("LLM_MODEL", "my-explicit")
+    assert providers.default_model() == "my-explicit"
+
+
+def test_fingerprint_tracks_provider_config(monkeypatch):
+    monkeypatch.setattr("core.app_runtime_config.APP_RUNTIME_CONFIG", {"llm_provider": ""})
+    _clean_model_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    fp_ollama = providers.provider_fingerprint()
+    assert providers.provider_fingerprint() == fp_ollama  # stable while unchanged
+    monkeypatch.setenv("LLM_PROVIDER", "xai")
+    assert providers.provider_fingerprint() != fp_ollama
+
+
+def test_task_runner_hot_swaps_client(monkeypatch):
+    from core.task_runner import TaskRunner
+
+    monkeypatch.setattr("core.app_runtime_config.APP_RUNTIME_CONFIG", {"llm_provider": ""})
+    _clean_model_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    runner = TaskRunner()
+    first = runner._get_ollama()
+    assert isinstance(first, OllamaClient)
+    assert runner._get_ollama() is first  # cached while config unchanged
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    assert isinstance(runner._get_ollama(), AnthropicClient)
+
+
+def test_agent_hot_swaps_client(monkeypatch):
+    from agent import Agent
+
+    monkeypatch.setattr("core.app_runtime_config.APP_RUNTIME_CONFIG", {"llm_provider": ""})
+    _clean_model_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    agent = Agent.__new__(Agent)
+    agent._llm_fingerprint = None
+    agent.ensure_current_llm_client()
+    first = agent.ollama
+    assert isinstance(first, OllamaClient)
+    agent.ensure_current_llm_client()
+    assert agent.ollama is first
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    agent.ensure_current_llm_client()
+    assert isinstance(agent.ollama, AnthropicClient)
+    assert agent.default_model == "claude-opus-4-8"
+
+
 def test_openai_message_conversion():
     client = OpenAICompatClient("https://api.openai.com/v1", api_key="sk-test")
     converted = client._convert_messages(INTERNAL_MESSAGES)

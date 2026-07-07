@@ -142,6 +142,7 @@ class TaskRunner:
 
         # Lazy — built on first use so we don't slow down startup
         self._ollama: OllamaClient | None = None
+        self._llm_fingerprint = None
         self._registry = None
         self._code_index = None
         self._registry_root: Path | None = None
@@ -1072,9 +1073,14 @@ class TaskRunner:
         }
 
     def _get_ollama(self):
-        if self._ollama is None:
-            from core.providers import create_llm_client, default_fallback_model
+        # Rebuild when provider settings changed (Settings saves apply to the
+        # next drive round — no backend restart needed).
+        from core.providers import create_llm_client, default_fallback_model, provider_fingerprint
+
+        fingerprint = provider_fingerprint()
+        if self._ollama is None or self._llm_fingerprint != fingerprint:
             self._ollama = create_llm_client(fallback_model=default_fallback_model() or None)
+            self._llm_fingerprint = fingerprint
         return self._ollama
 
     def _get_registry(self):

@@ -631,7 +631,7 @@ async def api_update_settings(payload: dict):
             )
 
     # Provider selection + API key (server-side only; never echoed back).
-    from core.providers import VALID_PROVIDERS, save_api_key
+    from core.providers import VALID_PROVIDERS, resolve_provider_name, save_api_key
 
     llm_provider = str(
         payload.get("llm_provider", app_cfg.get("llm_provider", "")) or ""
@@ -641,6 +641,14 @@ async def api_update_settings(payload: dict):
     api_key = str(payload.get("llm_api_key", "") or "").strip()
     if api_key:
         save_api_key(api_key)
+
+    # Switching provider: model overrides chosen for the OLD provider would
+    # be sent verbatim to the new provider's API and fail. Clear them so the
+    # new provider's default model takes over (the Runtime Models card can
+    # override again afterwards).
+    if llm_provider and llm_provider != resolve_provider_name() and "primary_model" not in payload:
+        primary_model = ""
+        fallback_model = ""
 
     save_app_runtime_config(
         {
