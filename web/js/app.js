@@ -1756,6 +1756,12 @@ async function loadSettings() {
         const keyPlaceholder = (p) => providerKeySet[p]
             ? 'Key found in your environment — leave blank to use it'
             : 'Paste your API key';
+        const providerModels = settings.provider_models || {};
+        const providerFallbacks = settings.provider_fallback_models || {};
+        const providerDefaults = settings.provider_default_models || {};
+        const modelPlaceholder = (p) => providerDefaults[p]
+            ? `Default: ${providerDefaults[p]} — leave blank to use it`
+            : 'e.g. qwen3 — pull a model with Ollama or set OLLAMA_MODEL in .env';
 
         $settingsContent.innerHTML = `
             ${banner}
@@ -1764,48 +1770,38 @@ async function loadSettings() {
                 <h3>Model Provider</h3>
                 <div class="settings-note">
                     Run on local Ollama (private), or bring an API key for Claude, GPT, or Grok.
-                    Keys already set in .env are detected automatically; anything you paste here
-                    is stored server-side only and never shown again.
+                    Your model choice is remembered per provider; leave it blank to use that
+                    provider's default. Keys already set in .env are detected automatically;
+                    anything you paste here is stored server-side only and never shown again.
                 </div>
                 <form id="provider-form" class="settings-form">
                     <div class="settings-field">
                         <label for="provider-select">Provider</label>
                         <select id="provider-select" class="settings-select">${providerOptions}</select>
                     </div>
+                    <div class="settings-field">
+                        <label for="provider-model-input">Model</label>
+                        <input id="provider-model-input" class="settings-input" type="text"
+                               value="${escapeHtml(providerModels[provider] || '')}"
+                               placeholder="${escapeHtml(modelPlaceholder(provider))}"
+                               ${provider === 'ollama' ? 'list="installed-models-list"' : ''}
+                               autocomplete="off" spellcheck="false">
+                        <datalist id="installed-models-list">${modelOptions}</datalist>
+                    </div>
+                    <div class="settings-field">
+                        <label for="provider-fallback-input">Fallback Model <span class="settings-subgroup-hint">(optional)</span></label>
+                        <input id="provider-fallback-input" class="settings-input" type="text"
+                               value="${escapeHtml(providerFallbacks[provider] || '')}"
+                               placeholder="Retried automatically if the main model fails"
+                               autocomplete="off" spellcheck="false">
+                    </div>
                     <div class="settings-field" id="api-key-field" ${provider === 'ollama' ? 'style="display:none"' : ''}>
                         <label for="api-key-input">API Key <span id="api-key-status" class="setting-source-pill" ${providerKeySet[provider] ? '' : 'style="display:none"'}>key detected</span></label>
                         <input id="api-key-input" class="settings-input" type="password" value="" placeholder="${keyPlaceholder(provider)}" autocomplete="off">
                     </div>
-                    <div class="settings-actions">
-                        <button type="submit" class="settings-btn primary">Save Provider</button>
-                    </div>
-                </form>
-            </div>
-            <div class="settings-card">
-                <h3>Runtime Models</h3>
-                <div class="settings-note">
-                    Choose the model LumaKit should use by default in the web UI. These settings persist in the app data directory and override the .env defaults until you reset them.
-                </div>
-                <form id="settings-form" class="settings-form">
-                    <div class="settings-field">
-                        <label for="primary-model-input">Primary Model</label>
-                        <input id="primary-model-input" class="settings-input" type="text" value="${escapeHtml(settings.app_primary_model || settings.model || '')}" placeholder="e.g. glm-5:cloud or qwen3">
-                    </div>
-                    <div class="settings-field">
-                        <label for="fallback-model-input">Fallback Model</label>
-                        <input id="fallback-model-input" class="settings-input" type="text" value="${escapeHtml(settings.app_fallback_model || settings.fallback_model || '')}" placeholder="Optional">
-                    </div>
-                    <div class="settings-field">
-                        <label for="installed-models-select">Detected Ollama Models</label>
-                        <select id="installed-models-select" class="settings-select">
-                            <option value="">Choose an installed model...</option>
-                            ${modelOptions}
-                        </select>
-                    </div>
                     ${modelsError}
                     <div class="settings-actions">
-                        <button type="submit" class="settings-btn primary">Save Models</button>
-                        <button type="button" id="reset-model-settings" class="settings-btn secondary">Reset To .env Defaults</button>
+                        <button type="submit" class="settings-btn primary">Save</button>
                     </div>
                 </form>
             </div>
@@ -1849,15 +1845,13 @@ async function loadSettings() {
                 </div>
 
                 <div class="settings-subgroup">
-                    <div class="settings-subgroup-label">App overrides <span class="settings-subgroup-hint">(set via this Settings page)</span></div>
+                    <div class="settings-subgroup-label">Saved model choices <span class="settings-subgroup-hint">(per provider, set above)</span></div>
+                    ${['ollama', 'anthropic', 'openai', 'xai'].map(p => `
                     <div class="setting-row">
-                        <span class="setting-label">Primary override</span>
-                        <span class="setting-value">${settings.app_primary_model || 'none'}</span>
-                    </div>
-                    <div class="setting-row">
-                        <span class="setting-label">Fallback override</span>
-                        <span class="setting-value">${settings.app_fallback_model || 'none'}</span>
-                    </div>
+                        <span class="setting-label">${{ollama: 'Ollama', anthropic: 'Anthropic', openai: 'OpenAI', xai: 'xAI'}[p]}</span>
+                        <span class="setting-value">${escapeHtml(providerModels[p] || '')
+                            || `<span class="settings-subgroup-hint">default${providerDefaults[p] ? ` (${escapeHtml(providerDefaults[p])})` : ''}</span>`}</span>
+                    </div>`).join('')}
                 </div>
 
                 <div class="settings-subgroup">
@@ -1886,19 +1880,37 @@ async function loadSettings() {
             </div>
         `;
 
-        const $primaryModelInput = document.getElementById('primary-model-input');
-        const $fallbackModelInput = document.getElementById('fallback-model-input');
-        const $installedModelsSelect = document.getElementById('installed-models-select');
-        const $settingsForm = document.getElementById('settings-form');
-        const $resetModelSettings = document.getElementById('reset-model-settings');
         const $toolApprovalInputs = $settingsContent.querySelectorAll('input[name="tool-approvals"]');
         const $providerForm = document.getElementById('provider-form');
         const $providerSelect = document.getElementById('provider-select');
+        const $providerModelInput = document.getElementById('provider-model-input');
+        const $providerFallbackInput = document.getElementById('provider-fallback-input');
         const $apiKeyField = document.getElementById('api-key-field');
         const $apiKeyInput = document.getElementById('api-key-input');
 
+        // Unsaved typing survives flipping the dropdown back and forth:
+        // stash drafts per provider, seeded from the saved choices.
+        const draftModels = { ...providerModels };
+        const draftFallbacks = { ...providerFallbacks };
+        let selectedProvider = provider;
+
         $providerSelect?.addEventListener('change', () => {
+            if ($providerModelInput) draftModels[selectedProvider] = $providerModelInput.value;
+            if ($providerFallbackInput) draftFallbacks[selectedProvider] = $providerFallbackInput.value;
             const p = $providerSelect.value;
+            selectedProvider = p;
+            if ($providerModelInput) {
+                $providerModelInput.value = draftModels[p] || '';
+                $providerModelInput.placeholder = modelPlaceholder(p);
+                if (p === 'ollama') {
+                    $providerModelInput.setAttribute('list', 'installed-models-list');
+                } else {
+                    $providerModelInput.removeAttribute('list');
+                }
+            }
+            if ($providerFallbackInput) {
+                $providerFallbackInput.value = draftFallbacks[p] || '';
+            }
             if ($apiKeyField) {
                 $apiKeyField.style.display = p === 'ollama' ? 'none' : '';
             }
@@ -1913,11 +1925,20 @@ async function loadSettings() {
 
         $providerForm?.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const payload = { llm_provider: $providerSelect?.value || 'ollama' };
+            const p = $providerSelect?.value || 'ollama';
+            const modelChoice = ($providerModelInput?.value || '').trim();
+            const payload = {
+                llm_provider: p,
+                llm_model: modelChoice,
+                llm_fallback_model: ($providerFallbackInput?.value || '').trim(),
+            };
             const key = ($apiKeyInput?.value || '').trim();
             if (key) payload.llm_api_key = key;
+            const activeModel = modelChoice || providerDefaults[p] || '';
             await saveSettings(payload, {
-                successMessage: 'Provider saved — active now for chats and background tasks. No restart needed.',
+                successMessage: activeModel
+                    ? `Saved — ${activeModel} is active now for chats and background tasks. No restart needed.`
+                    : 'Saved and active — no restart needed.',
                 busyLabel: 'Saving...',
             });
         });
@@ -1936,33 +1957,10 @@ async function loadSettings() {
         if (pendingSettingsFocus) {
             pendingSettingsFocus = false;
             requestAnimationFrame(() => {
-                $primaryModelInput?.focus();
-                $primaryModelInput?.select();
+                $providerModelInput?.focus();
+                $providerModelInput?.select();
             });
         }
-
-        $installedModelsSelect?.addEventListener('change', () => {
-            if ($installedModelsSelect.value) {
-                $primaryModelInput.value = $installedModelsSelect.value;
-            }
-        });
-
-        $settingsForm?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const primary_model = $primaryModelInput.value.trim();
-            const fallback_model = $fallbackModelInput.value.trim();
-            if (!primary_model && !(settings.env_primary_model || '').trim()) {
-                loadSettingsError('Choose a primary model or set OLLAMA_MODEL in .env first.');
-                return;
-            }
-            await saveSettings(
-                { primary_model, fallback_model },
-                {
-                    successMessage: `Saved model settings. Using ${primary_model || settings.env_primary_model}.`,
-                    busyLabel: 'Saving...',
-                },
-            );
-        });
 
         $toolApprovalInputs.forEach(input => {
             input.addEventListener('change', async () => {
@@ -1991,16 +1989,6 @@ async function loadSettings() {
                     },
                 );
             });
-        });
-
-        $resetModelSettings?.addEventListener('click', async () => {
-            await saveSettings(
-                { primary_model: '', fallback_model: '' },
-                {
-                    successMessage: 'Reset model settings to .env defaults.',
-                    busyLabel: 'Resetting...',
-                },
-            );
         });
 
         applySetupState();

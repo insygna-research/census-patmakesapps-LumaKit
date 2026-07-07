@@ -66,21 +66,45 @@ _PROVIDER_DEFAULT_MODELS = {
 }
 
 
-def default_model(provider: str | None = None) -> str:
-    explicit = str(os.getenv("LLM_MODEL", "") or "").strip()
-    if explicit:
-        return explicit
-    provider = provider or resolve_provider_name()
+def _chosen_provider_model(provider: str, key: str) -> str:
+    """The user's per-provider choice from the Settings UI, if any."""
+    try:
+        from core.app_runtime_config import get_app_runtime_config
+
+        chosen = (get_app_runtime_config().get(key) or {}).get(provider, "")
+        return str(chosen or "").strip()
+    except Exception:
+        return ""
+
+
+def provider_default_model(provider: str) -> str:
+    """The built-in default for a provider (what runs with no user choice)."""
     if provider == "ollama":
         return str(os.getenv("OLLAMA_MODEL", "") or "").strip()
     return _PROVIDER_DEFAULT_MODELS.get(provider, "")
 
 
+def default_model(provider: str | None = None) -> str:
+    provider = provider or resolve_provider_name()
+    # Resolution: the user's per-provider pick (Settings UI) → LLM_MODEL env
+    # → the provider's built-in default.
+    chosen = _chosen_provider_model(provider, "provider_models")
+    if chosen:
+        return chosen
+    explicit = str(os.getenv("LLM_MODEL", "") or "").strip()
+    if explicit:
+        return explicit
+    return provider_default_model(provider)
+
+
 def default_fallback_model(provider: str | None = None) -> str:
+    provider = provider or resolve_provider_name()
+    chosen = _chosen_provider_model(provider, "provider_fallback_models")
+    if chosen:
+        return chosen
     explicit = str(os.getenv("LLM_FALLBACK_MODEL", "") or "").strip()
     if explicit:
         return explicit
-    provider = provider or resolve_provider_name()
     if provider == "ollama":
         # Ollama-only fallback: a local fallback model makes no sense on a
         # remote provider's API.

@@ -19,6 +19,11 @@ DEFAULT_CONFIG = {
     "require_tool_approvals": True,
     # "" = follow the LLM_PROVIDER env var (default: ollama).
     "llm_provider": "",
+    # Per-provider model choices from the Settings UI, e.g.
+    # {"anthropic": "claude-sonnet-5"}. Switching providers restores the
+    # user's model for that provider; empty = the provider's default.
+    "provider_models": {},
+    "provider_fallback_models": {},
 }
 
 _VALID_PROVIDERS = {"", "ollama", "anthropic", "openai", "xai"}
@@ -27,6 +32,18 @@ _VALID_PROVIDERS = {"", "ollama", "anthropic", "openai", "xai"}
 def _coerce_provider(value) -> str:
     provider = str(value or "").strip().lower()
     return provider if provider in _VALID_PROVIDERS else ""
+
+
+def _coerce_provider_models(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for key, model in value.items():
+        provider = _coerce_provider(key)
+        model = str(model or "").strip()
+        if provider and model:
+            out[provider] = model
+    return out
 
 
 def _coerce_bool(value, default=True):
@@ -60,6 +77,10 @@ def load_app_runtime_config():
                     True,
                 ),
                 "llm_provider": _coerce_provider(data.get("llm_provider")),
+                "provider_models": _coerce_provider_models(data.get("provider_models")),
+                "provider_fallback_models": _coerce_provider_models(
+                    data.get("provider_fallback_models")
+                ),
             }
         )
     return config
@@ -84,6 +105,10 @@ def save_app_runtime_config(config):
         True,
     )
     payload["llm_provider"] = _coerce_provider(payload.get("llm_provider"))
+    payload["provider_models"] = _coerce_provider_models(payload.get("provider_models"))
+    payload["provider_fallback_models"] = _coerce_provider_models(
+        payload.get("provider_fallback_models")
+    )
 
     CONFIG_PATH.parent.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -63,6 +63,34 @@ def test_default_model_is_provider_aware(monkeypatch):
     assert providers.default_model() == "my-explicit"
 
 
+def test_per_provider_model_choice_wins(monkeypatch):
+    monkeypatch.setattr(
+        "core.app_runtime_config.APP_RUNTIME_CONFIG",
+        {
+            "llm_provider": "anthropic",
+            "provider_models": {"anthropic": "claude-sonnet-5", "openai": "gpt-5.2-mini"},
+            "provider_fallback_models": {"anthropic": "claude-haiku-4-5-20251001"},
+        },
+    )
+    _clean_model_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "env-model")  # user's UI choice beats env
+    assert providers.default_model() == "claude-sonnet-5"
+    assert providers.default_fallback_model() == "claude-haiku-4-5-20251001"
+    # a choice saved for another provider applies when switching to it…
+    assert providers.default_model("openai") == "gpt-5.2-mini"
+    # …and providers without a choice fall back to env, then built-in default
+    assert providers.default_model("xai") == "env-model"
+
+
+def test_fingerprint_changes_when_model_choice_saved(monkeypatch):
+    cfg = {"llm_provider": "anthropic", "provider_models": {}}
+    monkeypatch.setattr("core.app_runtime_config.APP_RUNTIME_CONFIG", cfg)
+    _clean_model_env(monkeypatch)
+    before = providers.provider_fingerprint()
+    cfg["provider_models"] = {"anthropic": "claude-sonnet-5"}
+    assert providers.provider_fingerprint() != before  # triggers hot-swap
+
+
 def test_fingerprint_tracks_provider_config(monkeypatch):
     monkeypatch.setattr("core.app_runtime_config.APP_RUNTIME_CONFIG", {"llm_provider": ""})
     _clean_model_env(monkeypatch)

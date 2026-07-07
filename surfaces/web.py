@@ -374,16 +374,31 @@ def _discover_ollama_models():
 
 def _settings_payload():
     from core import restart
-    from core.providers import api_key_is_set, resolve_provider_name
+    from core.providers import (
+        VALID_PROVIDERS,
+        api_key_is_set,
+        provider_default_model,
+        resolve_provider_name,
+    )
     env_cfg = _env_runtime_defaults()
     drifted_env_vars = restart.env_drift()
     effective = get_effective_config_for_user(WEB_USER_ID)
     app_cfg = get_app_runtime_config()
     installed_models, model_error = _discover_ollama_models()
     setup_required = not bool(effective.get("primary_model"))
-    primary_source = "app override" if app_cfg.get("primary_model") else ".env default"
-    fallback_source = "app override" if app_cfg.get("fallback_model") else ".env default"
     provider = resolve_provider_name()
+
+    def _model_source(legacy_override: str, saved_choice: str) -> str:
+        if legacy_override:
+            return "app override"
+        if saved_choice:
+            return "your choice"
+        return "provider default"
+
+    saved_models = app_cfg.get("provider_models") or {}
+    saved_fallbacks = app_cfg.get("provider_fallback_models") or {}
+    primary_source = _model_source(app_cfg.get("primary_model"), saved_models.get(provider, ""))
+    fallback_source = _model_source(app_cfg.get("fallback_model"), saved_fallbacks.get(provider, ""))
     return {
         "llm_provider": provider,
         # Never echo keys — only whether one is configured, per provider, so
@@ -393,6 +408,11 @@ def _settings_payload():
         "api_keys_set": {
             p: api_key_is_set(p) for p in ("anthropic", "openai", "xai")
         },
+        # Per-provider model memory for the provider card: the user's saved
+        # choices, and each provider's default for placeholder text.
+        "provider_models": dict(app_cfg.get("provider_models") or {}),
+        "provider_fallback_models": dict(app_cfg.get("provider_fallback_models") or {}),
+        "provider_default_models": {p: provider_default_model(p) for p in VALID_PROVIDERS},
         "model": effective.get("primary_model", ""),
         "fallback_model": effective.get("fallback_model", ""),
         "model_source": primary_source,
@@ -642,12 +662,33 @@ async def api_update_settings(payload: dict):
     if api_key:
         save_api_key(api_key)
 
-    # Switching provider: model overrides chosen for the OLD provider would
-    # be sent verbatim to the new provider's API and fail. Clear them so the
-    # new provider's default model takes over (the Runtime Models card can
-    # override again afterwards).
+    # Switching provider: legacy global model overrides chosen for the OLD
+    # provider would be sent verbatim to the new provider's API and fail.
     if llm_provider and llm_provider != resolve_provider_name() and "primary_model" not in payload:
         primary_model = ""
+        fallback_model = ""
+
+    # Per-provider model memory: the provider card saves the model FOR that
+    # provider, so switching back later restores the user's choice. Empty =
+    # use the provider's default.
+    provider_models = dict(app_cfg.get("provider_models") or {})
+    provider_fallbacks = dict(app_cfg.get("provider_fallback_models") or {})
+    target_provider = llm_provider or resolve_provider_name()
+    if "llm_model" in payload:
+        model_choice = str(payload.get("llm_model") or "").strip()
+        if model_choice:
+            provider_models[target_provider] = model_choice
+        else:
+            provider_models.pop(target_provider, None)
+        # The provider card is the canonical model picker — drop the legacy
+        # global override so it can't shadow the per-provider choice.
+        primary_model = ""
+    if "llm_fallback_model" in payload:
+        fallback_choice = str(payload.get("llm_fallback_model") or "").strip()
+        if fallback_choice:
+            provider_fallbacks[target_provider] = fallback_choice
+        else:
+            provider_fallbacks.pop(target_provider, None)
         fallback_model = ""
 
     save_app_runtime_config(
@@ -656,6 +697,8 @@ async def api_update_settings(payload: dict):
             "fallback_model": fallback_model,
             "require_tool_approvals": require_tool_approvals,
             "llm_provider": llm_provider,
+            "provider_models": provider_models,
+            "provider_fallback_models": provider_fallbacks,
         }
     )
     return _settings_payload()
