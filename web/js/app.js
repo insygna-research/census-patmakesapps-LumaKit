@@ -2708,10 +2708,13 @@ $input.addEventListener('input', () => {
     $input.style.height = Math.min($input.scrollHeight, 200) + 'px';
 });
 
-// New chat
+// New chat — switch views immediately so the button always responds, even
+// while the WebSocket is down/reconnecting (the server's chat_loaded event
+// still finalizes the fresh chat once it arrives).
 $newChatBtn.onclick = () => {
-    ws.send({ type: 'new_chat' });
+    switchView('chat');
     $sidebar.classList.remove('open');
+    ws.send({ type: 'new_chat' });
 };
 
 // Sidebar toggle (mobile)

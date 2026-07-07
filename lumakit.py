@@ -231,13 +231,25 @@ def _spawn_daemon(*, verbose: bool = False) -> None:
         cmd.append("--verbose")
 
     with DAEMON_LOG_FILE.open("a", encoding="utf-8") as log_file:
-        subprocess.Popen(
-            cmd,
-            cwd=str(REPO_ROOT),
-            stdout=log_file,
-            stderr=log_file,
-            start_new_session=True,
-        )
+        kwargs = {
+            "cwd": str(REPO_ROOT),
+            "stdout": log_file,
+            "stderr": log_file,
+        }
+        if os.name == "nt":
+            # Fully detach. Terminals, IDEs, and CI runners often place child
+            # trees in kill-on-close Job objects; without breakaway the
+            # "daemon" dies with whoever launched it — which is exactly what
+            # happens on /api/restart, where the parent is a dying process.
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+            try:
+                subprocess.Popen(cmd, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+            except OSError:
+                # The current job forbids breakaway — detach as far as allowed.
+                subprocess.Popen(cmd, creationflags=flags, **kwargs)
+            return
+        subprocess.Popen(cmd, start_new_session=True, **kwargs)
 
 
 def _render_systemd_service(
@@ -693,8 +705,22 @@ def command_serve(args) -> int:
         # Requested via /api/restart: relaunch as a background daemon now
         # that the port and runtime state are released. If this process was
         # a foreground `lumakit serve`, the new one continues detached.
+        # Verify the child actually boots (a spawned process can be killed
+        # at birth by Job-object teardown on Windows) and retry once.
         print("Restart requested — relaunching LumaKit in the background...")
-        _spawn_daemon(verbose=args.verbose)
+        for attempt in (1, 2):
+            _spawn_daemon(verbose=args.verbose)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                state = _runtime_state()
+                pid = (state or {}).get("pid")
+                if pid and pid != os.getpid() and _pid_running(pid):
+                    print(f"Relaunched LumaKit (pid {pid}).")
+                    return 0
+                time.sleep(0.5)
+            print(f"Respawn attempt {attempt} did not come up within 20s.")
+        print("RESTART FAILED: the relaunched process never became healthy. "
+              "Start manually with `lumakit open`.")
 
     return 0
 
