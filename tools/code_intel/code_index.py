@@ -621,6 +621,45 @@ class LazyCodeIndex:
         return self._ensure_built().code_index_summary(*args, **kwargs)
 
 
+def changed_paths_from_tool(tool_name: str, inputs: dict, result: dict) -> list[str]:
+    """Paths a successful mutating tool touched, else [].
+
+    Single source of truth for which tools change files and where their
+    changed paths live in the result payload (D-2) — feeds both the
+    incremental code-index refresh and the task runner's changed-files
+    artifact in the completion handoff.
+    """
+    if not result.get("success"):
+        return []
+    paths: list[str] = []
+    if tool_name in ("edit_file", "write_file", "delete_file"):
+        changed_path = inputs.get("path")
+        if changed_path:
+            paths.append(changed_path)
+    elif tool_name == "apply_patch":
+        for item in result.get("data", {}).get("changed_files", []):
+            changed_path = item.get("path")
+            if changed_path:
+                paths.append(changed_path)
+            old_path = item.get("old_path")
+            if old_path and old_path != changed_path:
+                paths.append(old_path)
+    elif tool_name == "move_path":
+        data = result.get("data", {})
+        for changed_path in (data.get("source_path"), data.get("destination_path")):
+            if changed_path:
+                paths.append(changed_path)
+    return paths
+
+
+def update_index_after_tool(index, tool_name: str, inputs: dict, result: dict) -> None:
+    """Incrementally refresh the index for the paths a mutating tool touched."""
+    if index is None:
+        return
+    for changed_path in changed_paths_from_tool(tool_name, inputs, result):
+        index.update_file(changed_path)
+
+
 # ======================================================================
 # Tool factory functions (match LumaKit's get_*_tool() pattern)
 # ======================================================================

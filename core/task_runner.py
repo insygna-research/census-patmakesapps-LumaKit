@@ -507,6 +507,10 @@ class TaskRunner:
     # Tool execution
     # ------------------------------------------------------------------
 
+    # Files-changed artifact for the completion handoff (§6.3): remember up
+    # to this many distinct paths the task's tools touched.
+    CHANGED_FILES_CAP = 50
+
     def _run_tool(self, task_id: int, name: str | None, inputs: dict) -> dict:
         # Protected-action gating happens in the drive loop (approval pause,
         # §6.3) before this is called.
@@ -514,7 +518,35 @@ class TaskRunner:
         self._emit(task_id, "tool", tool=name or "?", detail=_summarize_tool_args(name, inputs))
         result = registry.execute(name, inputs)
         self._update_code_index_after_tool(name, inputs, result)
+        self._record_changed_files(task_id, name, inputs, result)
         return result
+
+    def _record_changed_files(self, task_id: int, name: str | None, inputs: dict, result: dict) -> None:
+        """Accumulate the distinct file paths this task has modified in its
+        constraints, so the completion handoff and task page can show what
+        the task actually touched. Persisted → survives restarts."""
+        from tools.code_intel.code_index import changed_paths_from_tool
+
+        paths = changed_paths_from_tool(name or "", inputs, result)
+        if not paths:
+            return
+        task = task_store.get_task(task_id)
+        if not task:
+            return
+        constraints = dict(task.get("constraints") or {})
+        seen = [str(p) for p in (constraints.get("_files_changed") or [])]
+        overflow = int(constraints.get("_files_changed_overflow") or 0)
+        for p in paths:
+            p = str(p)
+            if p not in seen:
+                seen.append(p)
+        if len(seen) > self.CHANGED_FILES_CAP:
+            overflow += len(seen) - self.CHANGED_FILES_CAP
+            seen = seen[: self.CHANGED_FILES_CAP]
+        if overflow:
+            constraints["_files_changed_overflow"] = overflow
+        constraints["_files_changed"] = seen
+        task_store.update_task(task_id, constraints=json.dumps(constraints))
 
     def _tool_content_for_thread(self, result: dict) -> str:
         """Serialize a tool result for the persistent thread. Uses the same
@@ -641,6 +673,9 @@ class TaskRunner:
 
     def _finalize(self, task: dict, outcome: str, report: str) -> None:
         task_id = task["id"]
+        # Re-read: tools run since this round's load may have written
+        # constraints (e.g. _files_changed) that a stale copy would clobber.
+        task = task_store.get_task(task_id) or task
         # Clear any transient wait markers from constraints.
         constraints = {k: v for k, v in (task.get("constraints") or {}).items()
                        if not str(k).startswith("_wait")}
@@ -648,6 +683,11 @@ class TaskRunner:
 
         if not report:
             report = self._generate_report(task, outcome)
+
+        # Handoff artifact: what the task actually touched (§6.3).
+        files_note = self._files_changed_note(constraints)
+        if files_note:
+            task_store.append_history(task_id, {"type": "files_changed", "detail": files_note})
 
         if outcome == "blocked":
             task_store.update_task(task_id, status="blocked", result=report)
@@ -659,20 +699,34 @@ class TaskRunner:
             )
             print(f"[task-runner] task {task_id} blocked")
             return
+        files_suffix = f"\n\n{files_note}" if files_note else ""
         if outcome == "failed":
             task_store.fail_task(task_id, report)
             self._notify(
-                f"Task failed: {task['title']}\n\n{report}\n{self._task_link(task_id)}",
+                f"Task failed: {task['title']}\n\n{report}{files_suffix}\n{self._task_link(task_id)}",
                 task.get("owner_chat_id"),
             )
             print(f"[task-runner] task {task_id} failed")
             return
         task_store.complete_task(task_id, report)
         self._notify(
-            f"Task complete: {task['title']}\n\n{report}\n{self._task_link(task_id)}",
+            f"Task complete: {task['title']}\n\n{report}{files_suffix}\n{self._task_link(task_id)}",
             task.get("owner_chat_id"),
         )
         print(f"[task-runner] task {task_id} done")
+
+    @staticmethod
+    def _files_changed_note(constraints: dict) -> str:
+        """One-line 'Files changed (N): a, b, c (+n more)' summary, or ''."""
+        files = [str(p) for p in (constraints.get("_files_changed") or [])]
+        if not files:
+            return ""
+        overflow = int(constraints.get("_files_changed_overflow") or 0)
+        total = len(files) + overflow
+        shown = files[:8]
+        more = total - len(shown)
+        listing = ", ".join(shown) + (f" (+{more} more)" if more > 0 else "")
+        return f"Files changed ({total}): {listing}"
 
     def _parse_wait_request(self, inputs: dict) -> tuple[str, str]:
         reason = str(inputs.get("reason") or "waiting on external state").strip()[:300]
@@ -1070,25 +1124,9 @@ class TaskRunner:
         return fallback
 
     def _update_code_index_after_tool(self, name: str, inputs: dict, result: dict) -> None:
-        if self._code_index is None or not result.get("success"):
-            return
-        if name in ("edit_file", "write_file", "delete_file"):
-            changed_path = inputs.get("path")
-            if changed_path:
-                self._code_index.update_file(changed_path)
-        elif name == "apply_patch":
-            for item in result.get("data", {}).get("changed_files", []):
-                changed_path = item.get("path")
-                if changed_path:
-                    self._code_index.update_file(changed_path)
-                old_path = item.get("old_path")
-                if old_path and old_path != changed_path:
-                    self._code_index.update_file(old_path)
-        elif name == "move_path":
-            data = result.get("data", {})
-            for changed_path in (data.get("source_path"), data.get("destination_path")):
-                if changed_path:
-                    self._code_index.update_file(changed_path)
+        from tools.code_intel.code_index import update_index_after_tool
+
+        update_index_after_tool(self._code_index, name, inputs, result)
 
     @staticmethod
     def _friendly_time(iso: str) -> str:

@@ -22,7 +22,7 @@ from ollama_client import (
 from tool_registry import ToolRegistry
 from core.summarizer import apply_summary, build_summary_request, needs_summarization
 from core.storage import StorageManager
-from tools.code_intel.code_index import LazyCodeIndex
+from tools.code_intel.code_index import LazyCodeIndex, update_index_after_tool
 
 
 # Tools that modify files — require diff preview + confirmation
@@ -1119,23 +1119,7 @@ class Agent:
                         self.run_controller.mark_tool_end(tool_name, summary, error=is_error)
 
                         # Incrementally update code index when files change
-                        if tool_name in ("edit_file", "write_file", "delete_file"):
-                            changed_path = tool_inputs.get("path")
-                            if changed_path and tool_result.get("success"):
-                                self.code_index.update_file(changed_path)
-                        elif tool_name == "apply_patch" and tool_result.get("success"):
-                            for item in tool_result.get("data", {}).get("changed_files", []):
-                                changed_path = item.get("path")
-                                if changed_path:
-                                    self.code_index.update_file(changed_path)
-                                old_path = item.get("old_path")
-                                if old_path and old_path != changed_path:
-                                    self.code_index.update_file(old_path)
-                        elif tool_name == "move_path" and tool_result.get("success"):
-                            data = tool_result.get("data", {})
-                            for changed_path in (data.get("source_path"), data.get("destination_path")):
-                                if changed_path:
-                                    self.code_index.update_file(changed_path)
+                        update_index_after_tool(self.code_index, tool_name, tool_inputs, tool_result)
 
                         if self.verbose:
                             print(f"  [tool result] {json.dumps(tool_result)[:200]}")
