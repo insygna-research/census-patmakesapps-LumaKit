@@ -6,6 +6,15 @@
 
 **The self-hosted autonomous task agent you can actually trust with a shell.** Delegate a job from your desk, watch it work in a real UI, approve the risky steps, and get pinged when it's done. Runs on Claude, GPT, Grok — or fully local Ollama when privacy matters.
 
+<!-- LAUNCH GIF (pre-launch checklist §8.2): record per docs/demo-script.md, export ≤10 MB,
+     save as photos/lumakit_flagship_demo.gif, then uncomment:
+<p align="center">
+  <img src="photos/lumakit_flagship_demo.gif" alt="Delegate a job from the browser, watch it work, approve the risky step from your phone" width="720">
+</p>
+-->
+
+Coming from OpenClaw? See the honest comparison: [LumaKit vs OpenClaw](docs/vs-openclaw.md).
+
 LumaKit gives a model real tools: shell execution, repository work, web search, browser automation, screenshots, email, reminders, memory, and long-running autonomous tasks that survive restarts. Not another chat assistant — a task agent: you hand Lumi a job, it runs it start to finish, and it reports back.
 
 ## Why this matters
