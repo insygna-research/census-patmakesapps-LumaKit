@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     "fallback_model": "",
     "use_local_model": False,
     "system_prompt": "",
+    "workspace_path": "",
 }
 
 
@@ -29,6 +30,7 @@ def load_owner_config():
                 "fallback_model": str(data.get("fallback_model", "") or "").strip(),
                 "use_local_model": bool(data.get("use_local_model", False)),
                 "system_prompt": str(data.get("system_prompt", "") or "").strip(),
+                "workspace_path": str(data.get("workspace_path", "") or "").strip(),
             }
         )
     return config
@@ -41,6 +43,7 @@ def save_owner_config(config):
     payload["fallback_model"] = str(payload.get("fallback_model", "") or "").strip()
     payload["system_prompt"] = str(payload.get("system_prompt", "") or "").strip()
     payload["use_local_model"] = bool(payload.get("use_local_model", False))
+    payload["workspace_path"] = str(payload.get("workspace_path", "") or "").strip()
 
     CONFIG_PATH.parent.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
