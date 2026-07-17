@@ -62,8 +62,32 @@ def command_text_from_inputs(tool_inputs: dict) -> str:
     return command
 
 
+def safe_mode_enabled() -> bool:
+    from core.app_runtime_config import get_app_runtime_config
+
+    return bool(get_app_runtime_config().get("safe_mode", True))
+
+
+def unrestricted_filesystem_active() -> bool:
+    """Safe mode is off AND the active user is entitled to full machine access.
+
+    Non-owner Telegram users keep the workspace sandbox regardless of the
+    safe-mode toggle; web/CLI are single-user owner surfaces.
+    """
+    if safe_mode_enabled():
+        return False
+    from core import auth
+    from core.interface_context import get_interface
+
+    if get_interface() != "telegram":
+        return True
+    return auth.is_owner_active()
+
+
 def tool_always_requires_approval(tool_name: str, tool_inputs: dict) -> bool:
     """Interactive-surface policy: does this call prompt even with approvals off?"""
+    if not safe_mode_enabled():
+        return False
     if tool_name in ALWAYS_CONFIRM_TOOLS:
         return True
     if tool_name in _COMMAND_TOOLS:

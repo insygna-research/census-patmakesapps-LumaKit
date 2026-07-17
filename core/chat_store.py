@@ -251,6 +251,18 @@ def get_chat_workspace(chat_id: str, owner_id: str | None = None) -> str | None:
     return row["workspace_path"] if row else None
 
 
+def list_known_workspaces(limit: int = 10) -> list[str]:
+    """Distinct workspace paths any chat has used, most recently used first."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT workspace_path, MAX(updated_at) AS last_used FROM chat_workspaces "
+        "GROUP BY workspace_path ORDER BY last_used DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+    conn.close()
+    return [r["workspace_path"] for r in rows]
+
+
 def iter_chats_with_messages(owner_id: str | None = None) -> list[dict]:
     """Return saved conversations with messages for read-only search."""
     conn = _connect()

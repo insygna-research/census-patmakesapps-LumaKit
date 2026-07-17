@@ -52,6 +52,51 @@ def test_git_config_denied(workspace):
         ensure_tool_path_allowed(cfg)
 
 
+def test_safe_mode_off_allows_outside_workspace(workspace, monkeypatch, tmp_path):
+    from core import app_runtime_config
+
+    monkeypatch.setattr(
+        app_runtime_config,
+        "APP_RUNTIME_CONFIG",
+        {**app_runtime_config.APP_RUNTIME_CONFIG, "safe_mode": False},
+    )
+    outside = tmp_path / "anywhere.txt"
+    outside.write_text("x", encoding="utf-8")
+    assert ensure_tool_path_allowed(outside) == outside
+    # Secrets stay blocked even with safe mode off.
+    with pytest.raises(PermissionError):
+        ensure_tool_path_allowed(Path.home() / ".lumakit" / "web_session_token")
+    with pytest.raises(PermissionError):
+        ensure_tool_path_allowed(workspace / ".env")
+
+
+def test_safe_mode_off_keeps_sandbox_for_nonowner_telegram(workspace, monkeypatch, tmp_path):
+    from core import app_runtime_config, auth
+    from core.interface_context import set_interface
+
+    monkeypatch.setattr(
+        app_runtime_config,
+        "APP_RUNTIME_CONFIG",
+        {**app_runtime_config.APP_RUNTIME_CONFIG, "safe_mode": False},
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    auth.set_owner("111")
+    try:
+        auth.set_active_user("222")
+        set_interface("telegram", "222")
+        with pytest.raises(PermissionError):
+            ensure_tool_path_allowed(outside)
+
+        auth.set_active_user("111")
+        set_interface("telegram", "111")
+        assert ensure_tool_path_allowed(outside) == outside
+    finally:
+        set_interface(None, None)
+        auth.set_active_user(None)
+        auth.set_owner(None)
+
+
 def test_allow_paths_opt_in(workspace, monkeypatch, tmp_path):
     import os
 

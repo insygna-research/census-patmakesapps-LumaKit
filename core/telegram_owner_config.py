@@ -13,7 +13,19 @@ DEFAULT_CONFIG = {
     "use_local_model": False,
     "system_prompt": "",
     "workspace_path": "",
+    "recent_workspaces": [],
 }
+
+
+def _coerce_path_list(value):
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out[:10]
 
 
 def load_owner_config():
@@ -31,6 +43,7 @@ def load_owner_config():
                 "use_local_model": bool(data.get("use_local_model", False)),
                 "system_prompt": str(data.get("system_prompt", "") or "").strip(),
                 "workspace_path": str(data.get("workspace_path", "") or "").strip(),
+                "recent_workspaces": _coerce_path_list(data.get("recent_workspaces")),
             }
         )
     return config
@@ -44,6 +57,7 @@ def save_owner_config(config):
     payload["system_prompt"] = str(payload.get("system_prompt", "") or "").strip()
     payload["use_local_model"] = bool(payload.get("use_local_model", False))
     payload["workspace_path"] = str(payload.get("workspace_path", "") or "").strip()
+    payload["recent_workspaces"] = _coerce_path_list(payload.get("recent_workspaces"))
 
     CONFIG_PATH.parent.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")

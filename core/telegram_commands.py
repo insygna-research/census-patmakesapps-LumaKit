@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.chat_store import list_chats, load_chat, make_title, new_chat_id, save_chat, set_active_chat
+from core.chat_store import (
+    list_chats,
+    list_known_workspaces,
+    load_chat,
+    make_title,
+    new_chat_id,
+    save_chat,
+    set_active_chat,
+)
 from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
 from core.identity import chat_owner_id
 from core.runtime_config import apply_user_runtime, get_owner_effective_config
@@ -69,6 +77,47 @@ def _apply_owner_workspace(agent):
         agent.set_workspace_root(path)
     else:
         agent.set_workspace_root(_DEFAULT_WORKSPACE)
+
+
+def _resolve_workspace_input(agent, raw):
+    path = Path(str(raw).strip().strip('"')).expanduser()
+    if not path.is_absolute():
+        path = agent.workspace_root / path
+    return path.resolve(strict=False)
+
+
+def _known_workspaces():
+    """Candidate workspaces for the picker: default, Telegram recents, web chat workspaces."""
+    candidates = [str(_DEFAULT_WORKSPACE)]
+    candidates += OWNER_CONFIG.get("recent_workspaces") or []
+    candidates += list_known_workspaces(limit=10)
+    options, seen = [], set()
+    for raw in candidates:
+        path = Path(str(raw)).expanduser().resolve(strict=False)
+        key = str(path).lower()
+        if key in seen or not path.is_dir():
+            continue
+        seen.add(key)
+        options.append(path)
+    return options[:8]
+
+
+def _set_owner_workspace(agent, path):
+    OWNER_CONFIG["workspace_path"] = str(path)
+    recents = [str(path)] + [
+        p for p in (OWNER_CONFIG.get("recent_workspaces") or []) if str(p).lower() != str(path).lower()
+    ]
+    OWNER_CONFIG["recent_workspaces"] = recents[:10]
+    _save_owner_config()
+    agent.set_workspace_root(path)
+    send_message(f"Working directory set to: {path}")
+
+
+def _reset_owner_workspace(agent):
+    OWNER_CONFIG["workspace_path"] = ""
+    _save_owner_config()
+    agent.set_workspace_root(_DEFAULT_WORKSPACE)
+    send_message(f"Working directory reset to default: {_DEFAULT_WORKSPACE}")
 
 
 def apply_chat_runtime(agent, session, chat_id):
@@ -244,7 +293,8 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             lines.append("/approve <id> - approve a task's pending protected action")
             lines.append("/deny <id> - refuse a task's pending protected action")
             lines.append("/model - choose the owner's Telegram model settings")
-            lines.append("/workspace - view or set the working directory (alias /dir)")
+            lines.append("/workspace - pick or set the working directory (alias /dir)")
+            lines.append("/safemode - toggle full machine access (approvals + file sandbox)")
             lines.append("/users - list authorized users")
         lines.append("/personality - view or change your Telegram personality override")
         send_message("\n".join(lines))
@@ -313,6 +363,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
                 f"\nLocal mode: {'on' if owner_cfg['use_local_model'] else 'off'}"
                 f"\nLocal model: {owner_cfg['local_model'] or 'not set'}"
                 f"\nWorkspace: {agent.workspace_root}"
+                f"\nSafe mode: {'on' if get_app_runtime_config().get('safe_mode', True) else 'off'}"
             )
         user_cfg = _get_user_config(chat_id)
         send_message(
@@ -334,33 +385,88 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         )
         return True
 
-    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role", "/approve", "/deny", "/workspace", "/dir"} and str(chat_id) != str(OWNER_ID):
+    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role", "/approve", "/deny", "/workspace", "/dir", "/safemode"} and str(chat_id) != str(OWNER_ID):
         send_message("This command is owner-only.")
+        return True
+
+    if cmd == "/safemode" and str(chat_id) == str(OWNER_ID):
+        cfg = get_app_runtime_config().copy()
+        current = bool(cfg.get("safe_mode", True))
+        value = args.strip().lower()
+        if not value:
+            send_message(
+                f"Safe mode is {'ON' if current else 'OFF'}.\n\n"
+                "ON: shell/python/file-delete/git actions always ask for approval, "
+                "and file tools stay inside the workspace.\n"
+                "OFF: full machine access for you — no forced approval prompts, file tools "
+                "can go anywhere (secrets files stay blocked). Other users keep their limits.\n\n"
+                "Usage: /safemode on|off"
+            )
+            return True
+        if value not in {"on", "off"}:
+            send_message("Usage: /safemode on|off")
+            return True
+        cfg["safe_mode"] = value == "on"
+        save_app_runtime_config(cfg)
+        if value == "off":
+            hint = (
+                "\nHeads up: /permissions is still on, so regular tools will still ask once. "
+                "Use /permissions off for zero prompts."
+                if bool(cfg.get("require_tool_approvals", True))
+                else ""
+            )
+            send_message(
+                "⚠️ Safe mode OFF. Shell, python, file deletes, and git pushes now run "
+                "without approval prompts, and file tools can reach the whole machine. "
+                "Secrets files (.env, tokens) stay blocked." + hint
+            )
+        else:
+            send_message(
+                "Safe mode ON. Protected tools require approval again and file tools are "
+                "limited to the workspace."
+            )
         return True
 
     if cmd in {"/workspace", "/dir"} and str(chat_id) == str(OWNER_ID):
         action = args.strip()
+
         if not action:
-            saved = OWNER_CONFIG.get("workspace_path") or ""
-            send_message(
-                "Working directory\n\n"
-                f"Active: {agent.workspace_root}\n"
-                f"Saved override: {saved or '(none — using default)'}\n"
-                f"Default: {_DEFAULT_WORKSPACE}\n\n"
-                "Usage:\n"
-                "/workspace set <path>\n"
-                "/workspace reset"
-            )
+            options = _known_workspaces()
+            lines = [f"Active working directory:\n{agent.workspace_root}\n", "Known workspaces:\n"]
+            for i, p in enumerate(options, 1):
+                marker = "  ← active" if p == agent.workspace_root else ""
+                lines.append(f"{i}. {p}{marker}")
+            lines.append("\nReply with a number, a full path, 'reset', or 'cancel'.")
+            send_message("\n".join(lines))
+
+            reply, _ = poll_for_reply(chat_id)
+            choice = reply.strip()
+            low = choice.lower()
+            if low in ("cancel", "c", "n", "no"):
+                send_message("Cancelled.")
+                return True
+            if low == "reset":
+                _reset_owner_workspace(agent)
+                return True
+            if choice.lstrip("-").isdigit():
+                pick = int(choice) - 1
+                if 0 <= pick < len(options):
+                    _set_owner_workspace(agent, options[pick])
+                else:
+                    send_message("Invalid number.")
+                return True
+            path = _resolve_workspace_input(agent, choice)
+            if not path.is_dir():
+                send_message(f"That's not a directory I can find: {path}")
+                return True
+            _set_owner_workspace(agent, path)
             return True
 
         subparts = action.split(maxsplit=1)
         verb = subparts[0].lower()
 
         if verb == "reset":
-            OWNER_CONFIG["workspace_path"] = ""
-            _save_owner_config()
-            agent.set_workspace_root(_DEFAULT_WORKSPACE)
-            send_message(f"Working directory reset to default: {_DEFAULT_WORKSPACE}")
+            _reset_owner_workspace(agent)
             return True
 
         if verb == "set" and len(subparts) < 2:
@@ -368,17 +474,11 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             return True
 
         raw = subparts[1] if verb == "set" else action
-        path = Path(raw.strip().strip('"')).expanduser()
-        if not path.is_absolute():
-            path = agent.workspace_root / path
-        path = path.resolve(strict=False)
+        path = _resolve_workspace_input(agent, raw)
         if not path.is_dir():
             send_message(f"That's not a directory I can find: {path}")
             return True
-        OWNER_CONFIG["workspace_path"] = str(path)
-        _save_owner_config()
-        agent.set_workspace_root(path)
-        send_message(f"Working directory set to: {path}")
+        _set_owner_workspace(agent, path)
         return True
 
     if cmd in {"/approve", "/deny"} and str(chat_id) == str(OWNER_ID):

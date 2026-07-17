@@ -53,6 +53,13 @@ def ensure_tool_path_allowed(path: Path) -> Path:
             f"Access to '{resolved.name}' is blocked: this path can contain "
             "secrets and is never accessible to tools."
         )
+    # Safe mode off = owner opted into full machine access; only the secrets
+    # denylist above still applies. Imported lazily to avoid a paths <->
+    # app_runtime_config import cycle.
+    from core.approval_policy import unrestricted_filesystem_active
+
+    if unrestricted_filesystem_active():
+        return path
     root = get_repo_root().resolve(strict=False)
     if resolved == root or resolved.is_relative_to(root):
         return path

@@ -25,6 +25,30 @@ def test_read_tools_do_not_require_forced_approval():
     assert not tool_always_requires_approval("web_search", {"query": "x"})
 
 
+def test_safe_mode_off_disables_forced_approvals(monkeypatch):
+    from core import app_runtime_config
+
+    monkeypatch.setattr(
+        app_runtime_config,
+        "APP_RUNTIME_CONFIG",
+        {**app_runtime_config.APP_RUNTIME_CONFIG, "safe_mode": False},
+    )
+    assert not tool_always_requires_approval("execute_shell", {"command": "mv a b"})
+    assert not tool_always_requires_approval("delete_file", {})
+    assert not tool_always_requires_approval("git_push", {})
+
+
+def test_safe_mode_off_keeps_autonomous_refusals(monkeypatch):
+    from core import app_runtime_config
+
+    monkeypatch.setattr(
+        app_runtime_config,
+        "APP_RUNTIME_CONFIG",
+        {**app_runtime_config.APP_RUNTIME_CONFIG, "safe_mode": False},
+    )
+    assert autonomous_tool_refusal("git_push", {}) is not None
+
+
 def test_autonomous_tasks_refuse_protected_tools():
     assert autonomous_tool_refusal("git_push", {}) is not None
     assert autonomous_tool_refusal("delete_file", {"path": "x"}) is not None

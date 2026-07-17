@@ -17,6 +17,10 @@ DEFAULT_CONFIG = {
     "primary_model": "",
     "fallback_model": "",
     "require_tool_approvals": True,
+    # Safe mode keeps the always-confirm tool prompts and the workspace
+    # filesystem sandbox. Owner can disable it (/safemode off) for full
+    # machine access; the secrets denylist still applies.
+    "safe_mode": True,
     # "" = follow the LLM_PROVIDER env var (default: ollama).
     "llm_provider": "",
     # Per-provider model choices from the Settings UI, e.g.
@@ -76,6 +80,7 @@ def load_app_runtime_config():
                     data.get("require_tool_approvals"),
                     True,
                 ),
+                "safe_mode": _coerce_bool(data.get("safe_mode"), True),
                 "llm_provider": _coerce_provider(data.get("llm_provider")),
                 "provider_models": _coerce_provider_models(data.get("provider_models")),
                 "provider_fallback_models": _coerce_provider_models(
@@ -104,6 +109,7 @@ def save_app_runtime_config(config):
         payload.get("require_tool_approvals"),
         True,
     )
+    payload["safe_mode"] = _coerce_bool(payload.get("safe_mode"), True)
     payload["llm_provider"] = _coerce_provider(payload.get("llm_provider"))
     payload["provider_models"] = _coerce_provider_models(payload.get("provider_models"))
     payload["provider_fallback_models"] = _coerce_provider_models(
