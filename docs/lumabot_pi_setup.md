@@ -29,6 +29,39 @@ Expected layout:
 └── lumakit/
 ```
 
+## LumaBot hardware daemon and agent tools
+
+Clone both repositories into the layout above. In the LumaBot checkout,
+create its virtual environment and install only its Pi hardware dependencies.
+Do not install Playwright or Ollama.
+
+Install and start the supplied hardware service:
+
+```bash
+cd /home/lumabot21/lumabot
+sudo cp lumabot.service /etc/systemd/system/lumabot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now lumabot.service
+curl -fsS http://127.0.0.1:8971/status
+```
+
+The unit enables the Adafruit Motor Bonnet and X1200 battery gauge. Verify the
+robot is raised on a stand before testing movement. The present mapping is
+Motor 1 = left (software-inverted) and Motor 4 = right.
+
+The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`, and
+`lumabot_stop` tools call this service through `LUMABOT_URL`. Movement tools
+are owner-only. Natural-language intent and the final acknowledgement remain
+part of LumaKit's normal LLM tool-result cycle; there is no phrase parser.
+
+After updating either checkout:
+
+```bash
+sudo systemctl restart lumabot.service
+sudo systemctl restart lumakit.service
+sudo systemctl is-active lumabot.service lumakit.service
+```
+
 ## Factory installation
 
 Clone LumaKit and create an isolated environment:

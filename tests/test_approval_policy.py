@@ -68,6 +68,10 @@ def test_telegram_role_scoping():
         assert surface_tool_denial("execute_shell") is not None
         assert surface_tool_denial("write_file") is not None
         assert surface_tool_denial("create_task") is not None
+        assert surface_tool_denial("lumabot_drive") is not None
+        assert surface_tool_denial("lumabot_sequence") is not None
+        assert surface_tool_denial("lumabot_stop") is not None
+        assert surface_tool_denial("lumabot_status") is None
         assert surface_tool_denial("read_file") is None
 
         # web/CLI are single-user owner surfaces — unrestricted here

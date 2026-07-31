@@ -139,6 +139,10 @@ OWNER_ONLY_TOOLS = frozenset({
     "lumalok_get_secret",
     "lumalok_add_secret",
     "lumalok_update_secret",
+    # physical robot control
+    "lumabot_drive",
+    "lumabot_sequence",
+    "lumabot_stop",
     # tasks run autonomously with broader powers — creating/deleting them is
     # an escalation path for non-owners
     "create_task",
