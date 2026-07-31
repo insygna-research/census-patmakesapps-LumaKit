@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.chat_store import (
-    get_chat_lumabot_mode,
+    get_chat_lumabot_profile,
     list_chats,
     list_known_workspaces,
     load_chat,
@@ -13,7 +13,7 @@ from core.chat_store import (
     new_chat_id,
     save_chat,
     set_active_chat,
-    set_chat_lumabot_mode,
+    set_chat_lumabot_profile,
 )
 from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
 from core.identity import chat_owner_id
@@ -32,6 +32,52 @@ from core.telegram_state import (
     _sessions,
     _show_tools,
 )
+from tools.lumabot.remote import (
+    REMOTE_HELP,
+    execute_remote_action,
+    execute_remote_command,
+)
+
+
+def lumabot_remote_keyboard():
+    """Inline buttons with structured callback payloads, not language."""
+    return {
+        "inline_keyboard": [
+            [{"text": "▲ Forward", "callback_data": "lbot:drive:forward"}],
+            [
+                {"text": "↶ Left", "callback_data": "lbot:turn:left"},
+                {"text": "STOP", "callback_data": "lbot:stop"},
+                {"text": "Right ↷", "callback_data": "lbot:turn:right"},
+            ],
+            [{"text": "▼ Reverse", "callback_data": "lbot:drive:backward"}],
+            [
+                {"text": "Turn 180°", "callback_data": "lbot:turn_around"},
+                {"text": "Park", "callback_data": "lbot:park"},
+                {"text": "Status", "callback_data": "lbot:status"},
+            ],
+        ]
+    }
+
+
+def handle_lumabot_callback(data: str, session: dict) -> dict:
+    """Execute one structured Telegram button callback without an LLM."""
+    parts = str(data or "").split(":")
+    if not parts or parts[0] != "lbot":
+        return {"ok": False, "text": "Unknown LumaBot control."}
+    profile = get_chat_lumabot_profile(session.get("chat_id"))
+    action = parts[1] if len(parts) > 1 else ""
+    if profile != "remote" and action not in {"stop", "park"}:
+        return {"ok": False, "text": "LumaBot Remote mode is off."}
+    try:
+        if action == "drive" and len(parts) == 3:
+            return execute_remote_action("drive", direction=parts[2])
+        if action == "turn" and len(parts) == 3:
+            return execute_remote_action("turn", direction=parts[2])
+        if action in {"turn_around", "stop", "park", "status"} and len(parts) == 2:
+            return execute_remote_action(action)
+    except ValueError as error:
+        return {"ok": False, "text": str(error)}
+    return {"ok": False, "text": "Unknown LumaBot control."}
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +343,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             lines.append("/model - choose the owner's Telegram model settings")
             lines.append("/workspace - pick or set the working directory (alias /dir)")
             lines.append("/safemode - toggle full machine access (approvals + file sandbox)")
-            lines.append("/lumabot - toggle focused robot-control mode")
+            lines.append("/lumabot - agent or instant remote control")
             lines.append("/users - list authorized users")
         lines.append("/personality - view or change your Telegram personality override")
         send_message("\n".join(lines))
@@ -368,7 +414,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
                 f"\nLocal model: {owner_cfg['local_model'] or 'not set'}"
                 f"\nWorkspace: {agent.workspace_root}"
                 f"\nSafe mode: {'on' if get_app_runtime_config().get('safe_mode', True) else 'off'}"
-                f"\nLumaBot mode: {'on' if get_chat_lumabot_mode(session.get('chat_id')) else 'off'}"
+                f"\nLumaBot mode: {get_chat_lumabot_profile(session.get('chat_id'))}"
             )
         user_cfg = _get_user_config(chat_id)
         send_message(
@@ -395,24 +441,39 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         return True
 
     if cmd == "/lumabot" and str(chat_id) == str(OWNER_ID):
-        value = args.strip().lower()
-        current = get_chat_lumabot_mode(session.get("chat_id"))
-        if not value or value == "status":
+        command_parts = args.strip().split(maxsplit=1)
+        action = command_parts[0].lower() if command_parts else ""
+        current = get_chat_lumabot_profile(session.get("chat_id"))
+        if not action:
             send_message(
-                f"LumaBot mode is {'ON' if current else 'OFF'}.\n"
-                "Use /lumabot on or /lumabot off."
+                f"LumaBot mode: {current.upper()}\n\n{REMOTE_HELP}",
+                reply_markup=lumabot_remote_keyboard() if current == "remote" else None,
             )
             return True
-        if value not in {"on", "off"}:
-            send_message("Usage: /lumabot on|off|status")
+
+        if action in {"on", "agent", "remote", "off"}:
+            profile = "agent" if action == "on" else action
+            set_chat_lumabot_profile(session.get("chat_id"), profile)
+            apply_chat_runtime(agent, session, chat_id)
+            if profile == "agent":
+                send_message("LumaBot Agent mode ON. Natural language uses the configured LLM.")
+            elif profile == "remote":
+                send_message(
+                    "LumaBot Remote mode ON. These controls bypass the LLM.",
+                    reply_markup=lumabot_remote_keyboard(),
+                )
+            else:
+                send_message("LumaBot mode OFF. Full LumaKit is restored.")
             return True
-        enabled = value == "on"
-        set_chat_lumabot_mode(session.get("chat_id"), enabled)
-        apply_chat_runtime(agent, session, chat_id)
+
+        if action not in {"stop", "park", "status", "help"} and current != "remote":
+            send_message("Switch to Remote mode first with /lumabot remote.")
+            return True
+        result = execute_remote_command(args)
+        prefix = f"LumaBot mode: {current.upper()}\n" if action == "status" else ""
         send_message(
-            "LumaBot mode ON. Only robot tools are available."
-            if enabled
-            else "LumaBot mode OFF. Full LumaKit is restored."
+            prefix + result["text"],
+            reply_markup=lumabot_remote_keyboard() if current == "remote" else None,
         )
         return True
 

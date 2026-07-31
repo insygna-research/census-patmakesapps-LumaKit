@@ -54,19 +54,39 @@ The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`, and
 are owner-only. Natural-language intent and the final acknowledgement remain
 part of LumaKit's normal LLM tool-result cycle; there is no phrase parser.
 
-Enable focused robot control for an individual conversation:
+Choose a robot-control profile for an individual conversation:
 
 ```text
-Telegram: /lumabot on
-CLI:      /lumabot on
-Web:      click the LumaBot toggle in the top bar
+Telegram/CLI: /lumabot agent
+Telegram/CLI: /lumabot remote
+Telegram/CLI: /lumabot off
+Web: choose Off, Agent, or Remote in the top bar
 ```
 
-This replaces the full agent prompt and 98-tool catalog with a compact robot
-prompt and only the four LumaBot tools. The setting follows that saved
-conversation and `/lumabot off` restores full LumaKit. “Park” currently stops
-scheduled movement and coasts both motors. Autonomous patrol remains
-unavailable until the distance sensor is connected and verified.
+Agent mode replaces the full agent prompt and 98-tool catalog with a compact
+robot prompt and only the four LumaBot tools. Natural-language and voice
+requests still use the configured hosted model.
+
+Remote mode makes no LLM calls. The web UI shows a D-pad, Telegram shows
+inline buttons, and CLI/Telegram accept explicit commands such as:
+
+```text
+/lumabot drive forward 2 0.3
+/lumabot turn around
+/lumabot stop
+/lumabot park
+/lumabot status
+```
+
+The setting follows the saved conversation. Direct movement uses the same
+three-second hardware watchdog as Agent mode. The web STOP button and
+`/lumabot stop` bypass the LLM and interrupt an active Agent turn before it
+can issue another movement. Free-form text, photos, and voice are deliberately
+not interpreted in Remote mode. “Park” cancels scheduled movement and coasts
+both motors. The 180-degree control scales the one-second full-speed bench
+calibration for the selected throttle, but remains approximate without wheel
+encoders. Autonomous patrol remains unavailable until the distance sensor is
+connected and verified.
 
 After updating either checkout:
 

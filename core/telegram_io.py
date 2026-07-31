@@ -42,9 +42,9 @@ def _strip_emojis(text: str) -> str:
 # Outbound
 # ---------------------------------------------------------------------------
 
-def send_message(text, chat_id=None):
+def send_message(text, chat_id=None, reply_markup=None):
     chat_id = chat_id or _active_chat_id["value"]
-    return telegram_send_message(text, chat_id)
+    return telegram_send_message(text, chat_id, reply_markup=reply_markup)
 
 
 def edit_message_text(text, chat_id, message_id):

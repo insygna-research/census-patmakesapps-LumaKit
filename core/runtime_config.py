@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from core.app_runtime_config import get_app_runtime_config
-from core.chat_store import get_chat_lumabot_mode
+from core.chat_store import get_chat_lumabot_profile
 from core.telegram_state import OWNER_CONFIG, OWNER_ID, _get_user_config
 
 
@@ -69,8 +69,10 @@ def apply_user_runtime(agent, session, user_id, surface=None):
         refresh_client()
     user_cfg = _get_user_config(user_id)
     personality_prompt = user_cfg.get("personality_prompt") or None
-    lumabot_enabled = get_chat_lumabot_mode(session.get("chat_id"))
-    context_instructions = "" if lumabot_enabled else _surface_instructions(surface)
+    lumabot_profile = get_chat_lumabot_profile(session.get("chat_id"))
+    context_instructions = (
+        "" if lumabot_profile != "off" else _surface_instructions(surface)
+    )
     config = get_effective_config_for_user(
         user_id=user_id,
         default_model=agent.default_model,
@@ -79,7 +81,11 @@ def apply_user_runtime(agent, session, user_id, surface=None):
     )
     set_profile = getattr(agent, "set_runtime_profile", None)
     if callable(set_profile):
-        set_profile("lumabot" if lumabot_enabled else None)
+        runtime_profile = {
+            "agent": "lumabot",
+            "remote": "lumabot_remote",
+        }.get(lumabot_profile)
+        set_profile(runtime_profile)
 
     agent.apply_runtime_overrides(
         messages=agent.messages,
@@ -90,7 +96,7 @@ def apply_user_runtime(agent, session, user_id, surface=None):
     )
 
     session["messages"] = agent.messages
-    session["lumabot_mode"] = lumabot_enabled
+    session["lumabot_mode"] = lumabot_profile
 
 
 def _surface_instructions(surface):

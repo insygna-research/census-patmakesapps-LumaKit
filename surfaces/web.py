@@ -37,6 +37,7 @@ from core import email_draft_store
 from core.chat_store import (
     delete_chat,
     get_active_chat,
+    get_chat_lumabot_profile,
     get_chat_workspace,
     list_chats,
     load_chat,
@@ -44,7 +45,7 @@ from core.chat_store import (
     new_chat_id,
     save_chat,
     set_active_chat,
-    set_chat_lumabot_mode,
+    set_chat_lumabot_profile,
     set_chat_workspace,
 )
 from core import notifications as notification_log
@@ -60,6 +61,7 @@ from core.app_runtime_config import get_app_runtime_config, save_app_runtime_con
 from ollama_client import OllamaClient
 from tools.comms.email import send_preapproved
 from tools.comms.react import set_react_context
+from tools.lumabot.remote import REMOTE_HELP, execute_remote_action
 from tools.memory.memory_tools import set_active_user as set_memory_active_user
 
 PORT = int(os.getenv("LUMAKIT_WEB_PORT", "7865"))
@@ -1223,13 +1225,13 @@ async def websocket_chat(ws: WebSocket):
             "chat_id": session["chat_id"],
             "title": session["title"],
             "messages": session["display_messages"],
-            "lumabot_mode": bool(session.get("lumabot_mode")),
+            "lumabot_mode": session.get("lumabot_mode", "off"),
             **_workspace_payload(session["workspace_path"]),
         })
     else:
         await ws.send_json({
             "type": "workspace_updated",
-            "lumabot_mode": bool(session.get("lumabot_mode")),
+            "lumabot_mode": session.get("lumabot_mode", "off"),
             **_workspace_payload(session["workspace_path"]),
         })
 
@@ -1290,7 +1292,7 @@ async def websocket_chat(ws: WebSocket):
                     "run_error": run_error,
                     "streamed": bool(response.get("streamed")),
                     "messages": session["display_messages"],
-                    "lumabot_mode": bool(session.get("lumabot_mode")),
+                    "lumabot_mode": session.get("lumabot_mode", "off"),
                     **_workspace_payload(session["workspace_path"]),
                 })
         except Exception as e:
@@ -1394,21 +1396,45 @@ async def websocket_chat(ws: WebSocket):
                         "text": "Finish or stop the current run before changing LumaBot mode.",
                     })
                     continue
-                enabled = data.get("enabled")
-                if not isinstance(enabled, bool):
+                mode = str(data.get("mode", "")).lower()
+                if mode not in {"off", "agent", "remote"}:
                     await ws.send_json({"type": "error", "text": "Invalid LumaBot mode value."})
                     continue
-                set_chat_lumabot_mode(session["chat_id"], enabled)
+                set_chat_lumabot_profile(session["chat_id"], mode)
                 _prepare_web_turn(agent, session)
                 await ws.send_json({
                     "type": "lumabot_mode",
-                    "enabled": enabled,
-                    "text": (
-                        "LumaBot mode ON. Only robot tools are available."
-                        if enabled
-                        else "LumaBot mode OFF. Full LumaKit is restored."
-                    ),
+                    "mode": mode,
+                    "text": {
+                        "agent": "LumaBot Agent mode ON. Natural language uses the configured LLM.",
+                        "remote": "LumaBot Remote mode ON. Controls now bypass the LLM.",
+                        "off": "LumaBot mode OFF. Full LumaKit is restored.",
+                    }[mode],
                 })
+                continue
+
+            if msg_type == "lumabot_control":
+                action = str(data.get("action", "")).lower()
+                profile = get_chat_lumabot_profile(session["chat_id"])
+                if action not in {"stop", "park", "status"} and profile != "remote":
+                    await ws.send_json({
+                        "type": "lumabot_control",
+                        "ok": False,
+                        "text": "Switch to LumaBot Remote mode first.",
+                    })
+                    continue
+                try:
+                    result = execute_remote_action(
+                        action,
+                        direction=data.get("direction"),
+                        duration_s=data.get("duration_s", 1.0),
+                        speed=data.get("speed", 0.3),
+                    )
+                except ValueError as error:
+                    result = {"ok": False, "text": str(error)}
+                if action in {"stop", "park"} and agent_task and not agent_task.done():
+                    agent.request_stop("LumaBot emergency stop requested.")
+                await ws.send_json({"type": "lumabot_control", **result})
                 continue
 
             # Load a specific chat
@@ -1436,7 +1462,7 @@ async def websocket_chat(ws: WebSocket):
                         "chat_id": session["chat_id"],
                         "title": session["title"],
                         "messages": session["display_messages"],
-                        "lumabot_mode": bool(session.get("lumabot_mode")),
+                        "lumabot_mode": session.get("lumabot_mode", "off"),
                         **_workspace_payload(session["workspace_path"]),
                     })
                 else:
@@ -1464,7 +1490,7 @@ async def websocket_chat(ws: WebSocket):
                     "chat_id": session["chat_id"],
                     "title": "",
                     "messages": [],
-                    "lumabot_mode": bool(session.get("lumabot_mode")),
+                    "lumabot_mode": session.get("lumabot_mode", "off"),
                     **_workspace_payload(session["workspace_path"]),
                 })
                 continue
@@ -1480,6 +1506,14 @@ async def websocket_chat(ws: WebSocket):
                     continue
 
                 if not text and not image_data:
+                    continue
+
+                if get_chat_lumabot_profile(session["chat_id"]) == "remote":
+                    await ws.send_json({
+                        "type": "lumabot_control",
+                        "ok": False,
+                        "text": REMOTE_HELP,
+                    })
                     continue
 
                 normalized = text.lower()

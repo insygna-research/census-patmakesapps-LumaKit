@@ -10,7 +10,15 @@ import sys
 import tempfile
 
 from agent import Agent
-from core.chat_store import get_active_chat, load_chat, make_title, new_chat_id, save_chat, set_active_chat
+from core.chat_store import (
+    get_active_chat,
+    get_chat_lumabot_profile,
+    load_chat,
+    make_title,
+    new_chat_id,
+    save_chat,
+    set_active_chat,
+)
 from core.cli import render_storage_meter
 from core.commands import handle_command
 from core.identity import CLI_USER_ID
@@ -19,6 +27,7 @@ from core.paths import get_repo_root
 from core.runtime_config import apply_user_runtime
 from core.service import LumaKitService, Surface
 from tools.memory.memory_tools import set_active_user as set_memory_active_user
+from tools.lumabot.remote import REMOTE_HELP
 
 
 def _workspace_scope() -> str:
@@ -152,6 +161,11 @@ def main(argv: list[str] | None = None):
         if not user_input:
             continue
 
+        remote_mode = get_chat_lumabot_profile(session["chat_id"]) == "remote"
+        if remote_mode and user_input.lower().startswith(("/p", "/image")):
+            print(f"\n{REMOTE_HELP}\n")
+            continue
+
         if user_input.startswith("/"):
             if user_input.lower().startswith("/p"):
                 parts = user_input.split(maxsplit=1)
@@ -194,6 +208,10 @@ def main(argv: list[str] | None = None):
                 continue
 
             handle_command(user_input, agent, session)
+            continue
+
+        if remote_mode:
+            print(f"\n{REMOTE_HELP}\n")
             continue
 
         try:

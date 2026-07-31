@@ -520,12 +520,17 @@ class Agent:
 
     def set_runtime_profile(self, profile=None):
         """Select a focused prompt/tool profile for the next turn."""
-        if profile not in {None, "lumabot"}:
+        if profile not in {None, "lumabot", "lumabot_remote"}:
             raise ValueError(f"Unknown runtime profile: {profile}")
         if self.runtime_profile == profile:
             return
         self.runtime_profile = profile
-        self._active_tool_groups = ("lumabot",) if profile == "lumabot" else None
+        if profile == "lumabot":
+            self._active_tool_groups = ("lumabot",)
+        elif profile == "lumabot_remote":
+            self._active_tool_groups = ("__remote_direct_only__",)
+        else:
+            self._active_tool_groups = None
         self._system_prompt_cache.clear()
         self._system_message_cache.clear()
 
@@ -550,6 +555,14 @@ class Agent:
             "sentence under 12 words unless the user asks for details."
         )
 
+    @staticmethod
+    def _lumabot_remote_system_prompt():
+        return (
+            "LumaBot Remote mode is active. Direct structured controls are handled "
+            "outside the language model. No tools are available in this profile. "
+            "Tell the user to use the visible controls or /lumabot help."
+        )
+
     def build_system_prompt(self, extra_instructions=None, context_instructions=None):
         extra = (extra_instructions or "").strip()
         context = (context_instructions or "").strip()
@@ -561,7 +574,11 @@ class Agent:
         prompt = (
             self._lumabot_system_prompt()
             if self.runtime_profile == "lumabot"
-            else self._system_prompt_prefix
+            else (
+                self._lumabot_remote_system_prompt()
+                if self.runtime_profile == "lumabot_remote"
+                else self._system_prompt_prefix
+            )
         )
         if extra:
             prompt += (
