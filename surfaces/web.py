@@ -1424,11 +1424,15 @@ async def websocket_chat(ws: WebSocket):
                     })
                     continue
                 try:
+                    continuous = data.get("continuous", False)
+                    if not isinstance(continuous, bool):
+                        raise ValueError("continuous must be true or false")
                     result = execute_remote_action(
                         action,
                         direction=data.get("direction"),
                         duration_s=data.get("duration_s", 1.0),
                         speed=data.get("speed", 0.3),
+                        continuous=continuous,
                     )
                 except ValueError as error:
                     result = {"ok": False, "text": str(error)}

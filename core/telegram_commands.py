@@ -70,7 +70,7 @@ def handle_lumabot_callback(data: str, session: dict) -> dict:
         return {"ok": False, "text": "LumaBot Remote mode is off."}
     try:
         if action == "drive" and len(parts) == 3:
-            return execute_remote_action("drive", direction=parts[2])
+            return execute_remote_action("drive", direction=parts[2], continuous=True)
         if action == "turn" and len(parts) == 3:
             return execute_remote_action("turn", direction=parts[2])
         if action in {"turn_around", "stop", "park", "status"} and len(parts) == 2:

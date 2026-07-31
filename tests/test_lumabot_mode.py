@@ -171,14 +171,26 @@ def test_remote_command_dispatches_once_without_llm(monkeypatch):
             calls.append(("start", direction, speed, duration))
             return {"accepted": True, "entire_request_scheduled": True}
 
+        def start_continuous(self, direction, speed):
+            calls.append(("continuous", direction, speed))
+            return {"accepted": True, "continuous": True}
+
         def stop(self):
             calls.append(("stop",))
             return {"stopped": True}
 
     monkeypatch.setattr(remote, "SCHEDULER", Scheduler())
+    latched = remote.execute_remote_command("drive forward")
+    assert latched["ok"] is True
+    assert calls == [("continuous", "forward", 0.3)]
+
     result = remote.execute_remote_command("drive forward 2 0.4")
     assert result["ok"] is True
-    assert calls == [("start", "forward", 0.4, 2.0)]
+    assert calls[-1] == ("start", "forward", 0.4, 2.0)
+
+    reversed_result = remote.execute_remote_command("drive reverse")
+    assert reversed_result["ok"] is True
+    assert calls[-1] == ("continuous", "backward", 0.3)
 
     stopped = remote.execute_remote_command("park")
     assert stopped["ok"] is True
@@ -224,7 +236,7 @@ def test_telegram_button_uses_structured_callback_without_llm(monkeypatch):
         {"chat_id": "robot-chat"},
     )
     assert result["ok"] is True
-    assert calls == [("drive", {"direction": "forward"})]
+    assert calls == [("drive", {"direction": "forward", "continuous": True})]
 
 
 def test_remote_number_validation_rejects_boolean():

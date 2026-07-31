@@ -15,25 +15,61 @@ RENEW_MARGIN_S = 0.25
 class MotionScheduler:
     def __init__(self):
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
         self._cancel_event: threading.Event | None = None
 
     def start(self, direction: str, speed: float, duration_s: float) -> dict:
         step = {"direction": direction, "speed": speed, "duration_s": duration_s}
         return self.start_sequence([step], single_drive=True)
 
+    def start_continuous(self, direction: str, speed: float) -> dict:
+        """Keep renewing a short drive lease until another command cancels it."""
+        cancel_event = self._replace_active_motion()
+        result = self._send_drive_if_active(
+            cancel_event,
+            direction,
+            speed,
+            WATCHDOG_LEASE_S,
+        )
+        if result is None:
+            return {"error": "Movement was replaced before it started."}
+        if result.get("error"):
+            self._clear_active_motion(cancel_event)
+            return result
+
+        worker = threading.Thread(
+            target=self._renew_continuous,
+            args=(cancel_event, direction, speed),
+            daemon=True,
+            name="lumabot-continuous-motion",
+        )
+        worker.start()
+        return {
+            **result,
+            "continuous": True,
+            "watchdog_lease_s": WATCHDOG_LEASE_S,
+            "scheduled": True,
+            "entire_request_scheduled": True,
+            "direction": direction,
+            "speed": speed,
+        }
+
     def start_sequence(self, steps: list[dict], single_drive: bool = False) -> dict:
-        cancel_event = threading.Event()
-        with self._lock:
-            if self._cancel_event:
-                self._cancel_event.set()
-            self._cancel_event = cancel_event
+        cancel_event = self._replace_active_motion()
 
         first = steps[0]
         started_at = time.monotonic()
         first_lease = min(WATCHDOG_LEASE_S, first["duration_s"])
-        result = client.drive(first["direction"], first["speed"], first_lease)
+        result = self._send_drive_if_active(
+            cancel_event,
+            first["direction"],
+            first["speed"],
+            first_lease,
+        )
+        if result is None:
+            return {"error": "Movement was replaced before it started."}
         if result.get("error"):
-            cancel_event.set()
+            self._clear_active_motion(cancel_event)
             return result
 
         if len(steps) > 1 or first["duration_s"] > first_lease:
@@ -81,8 +117,13 @@ class MotionScheduler:
                 return
             step_started = time.monotonic()
             first_lease = min(WATCHDOG_LEASE_S, step["duration_s"])
-            result = client.drive(step["direction"], step["speed"], first_lease)
-            if result.get("error"):
+            result = self._send_drive_if_active(
+                cancel_event,
+                step["direction"],
+                step["speed"],
+                first_lease,
+            )
+            if result is None or result.get("error"):
                 return
             if not self._finish_step(cancel_event, step, step_started, first_lease):
                 return
@@ -112,10 +153,67 @@ class MotionScheduler:
             if remaining <= 0:
                 return True
             next_lease = min(WATCHDOG_LEASE_S, remaining)
-            result = client.drive(step["direction"], step["speed"], next_lease)
-            if result.get("error"):
+            result = self._send_drive_if_active(
+                cancel_event,
+                step["direction"],
+                step["speed"],
+                next_lease,
+            )
+            if result is None or result.get("error"):
                 return False
             lease_deadline = time.monotonic() + next_lease
+
+    def _renew_continuous(
+        self,
+        cancel_event: threading.Event,
+        direction: str,
+        speed: float,
+    ) -> None:
+        renew_in = max(0.01, WATCHDOG_LEASE_S - RENEW_MARGIN_S)
+        while not cancel_event.wait(renew_in):
+            result = self._send_drive_if_active(
+                cancel_event,
+                direction,
+                speed,
+                WATCHDOG_LEASE_S,
+            )
+            if result is None:
+                return
+            if result.get("error"):
+                self._clear_active_motion(cancel_event)
+                return
+
+    def _replace_active_motion(self) -> threading.Event:
+        cancel_event = threading.Event()
+        with self._lock:
+            if self._cancel_event:
+                self._cancel_event.set()
+            self._cancel_event = cancel_event
+        return cancel_event
+
+    def _clear_active_motion(self, cancel_event: threading.Event) -> None:
+        cancel_event.set()
+        with self._lock:
+            if self._cancel_event is cancel_event:
+                self._cancel_event = None
+
+    def _send_drive(self, direction: str, speed: float, duration_s: float) -> dict:
+        with self._send_lock:
+            return client.drive(direction, speed, duration_s)
+
+    def _send_drive_if_active(
+        self,
+        cancel_event: threading.Event,
+        direction: str,
+        speed: float,
+        duration_s: float,
+    ) -> dict | None:
+        # Hold the state lock through the send so an older renewal cannot race
+        # behind a newer direction and overwrite it at the daemon.
+        with self._lock:
+            if self._cancel_event is not cancel_event or cancel_event.is_set():
+                return None
+            return self._send_drive(direction, speed, duration_s)
 
     def cancel(self) -> None:
         with self._lock:
@@ -125,7 +223,8 @@ class MotionScheduler:
 
     def stop(self) -> dict:
         self.cancel()
-        return client.stop()
+        with self._send_lock:
+            return client.stop()
 
 
 SCHEDULER = MotionScheduler()

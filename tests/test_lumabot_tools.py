@@ -7,6 +7,7 @@ import pytest
 from tool_registry import ToolRegistry
 from tools.lumabot import client
 from tools.lumabot.motion import (
+    MotionScheduler,
     SCHEDULER,
     get_lumabot_drive_tool,
     get_lumabot_sequence_tool,
@@ -116,6 +117,43 @@ def test_sequence_runs_each_step_once_and_in_order(registry, monkeypatch):
     time.sleep(0.35)
     assert calls == [("forward", 0.1), ("left", 0.1), ("backward", 0.1)]
     SCHEDULER.cancel()
+
+
+def test_continuous_motion_renews_until_stopped(monkeypatch):
+    from tools.lumabot import motion
+
+    calls = []
+    monkeypatch.setattr(motion, "WATCHDOG_LEASE_S", 0.08)
+    monkeypatch.setattr(motion, "RENEW_MARGIN_S", 0.02)
+    monkeypatch.setattr(
+        client,
+        "drive",
+        lambda direction, speed, duration: calls.append(
+            ("drive", direction, speed, duration)
+        )
+        or {"accepted": True, "direction": direction},
+    )
+    monkeypatch.setattr(
+        client,
+        "stop",
+        lambda: calls.append(("stop",)) or {"stopped": True},
+    )
+
+    scheduler = MotionScheduler()
+    result = scheduler.start_continuous("forward", 0.3)
+    assert result["continuous"] is True
+
+    deadline = time.monotonic() + 0.5
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) >= 2
+    assert all(call[1] == "forward" for call in calls if call[0] == "drive")
+
+    scheduler.stop()
+    calls_after_stop = len(calls)
+    time.sleep(0.12)
+    assert len(calls) == calls_after_stop
+    assert calls[-1] == ("stop",)
 
 
 def test_stop_and_status_return_daemon_results(registry, monkeypatch):

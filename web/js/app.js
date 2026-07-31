@@ -2674,6 +2674,7 @@ $lumabotRemoteControls?.querySelectorAll('button[data-action]').forEach(button =
             direction: button.dataset.direction || null,
             duration_s: Number($lumabotDuration?.value || 1),
             speed: Number($lumabotSpeed?.value || 0.3),
+            continuous: button.dataset.action === 'drive',
         });
     });
 });

@@ -71,6 +71,8 @@ Remote mode makes no LLM calls. The web UI shows a D-pad, Telegram shows
 inline buttons, and CLI/Telegram accept explicit commands such as:
 
 ```text
+/lumabot drive forward
+/lumabot drive backward
 /lumabot drive forward 2 0.3
 /lumabot turn around
 /lumabot stop
@@ -79,7 +81,12 @@ inline buttons, and CLI/Telegram accept explicit commands such as:
 ```
 
 The setting follows the saved conversation. Direct movement uses the same
-three-second hardware watchdog as Agent mode. The web STOP button and
+three-second hardware watchdog as Agent mode. In Remote mode, the Forward and
+Reverse buttons—and drive commands without a duration—stay active until STOP
+or another movement control replaces them. LumaKit renews a three-second lease
+while they are active, so the daemon still coasts the motors if LumaKit exits
+or loses contact. Supplying a duration keeps the drive timed; the web duration
+selector applies to turns. The web STOP button and
 `/lumabot stop` bypass the LLM and interrupt an active Agent turn before it
 can issue another movement. Free-form text, photos, and voice are deliberately
 not interpreted in Remote mode. “Park” cancels scheduled movement and coasts
