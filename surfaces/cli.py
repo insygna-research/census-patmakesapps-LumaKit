@@ -14,7 +14,9 @@ from core.chat_store import get_active_chat, load_chat, make_title, new_chat_id,
 from core.cli import render_storage_meter
 from core.commands import handle_command
 from core.identity import CLI_USER_ID
+from core.interface_context import set_interface
 from core.paths import get_repo_root
+from core.runtime_config import apply_user_runtime
 from core.service import LumaKitService, Surface
 from tools.memory.memory_tools import set_active_user as set_memory_active_user
 
@@ -121,6 +123,8 @@ def main(argv: list[str] | None = None):
             "active_chat_scope": workspace_scope,
         }
     set_active_chat(CLI_USER_ID, session["chat_id"], scope=workspace_scope)
+    set_interface("cli", CLI_USER_ID)
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
 
     print("\n=== LumaKit CLI ===")
     health = agent.storage.check_health()
@@ -193,6 +197,7 @@ def main(argv: list[str] | None = None):
             continue
 
         try:
+            apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
             response = agent.ask_llm(user_input)
             content = response.get("message", {}).get("content", "")
             if content:

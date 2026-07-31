@@ -49,6 +49,13 @@ def _connect():
             updated_at TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_runtime_modes (
+            chat_id TEXT PRIMARY KEY,
+            lumabot_enabled INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "owner_id" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN owner_id TEXT")
@@ -214,6 +221,7 @@ def delete_chat(chat_id: str, owner_id: str | None = None) -> bool:
         )
     if cursor.rowcount > 0:
         conn.execute("DELETE FROM chat_workspaces WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM chat_runtime_modes WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
     return cursor.rowcount > 0
@@ -249,6 +257,34 @@ def get_chat_workspace(chat_id: str, owner_id: str | None = None) -> str | None:
         ).fetchone()
     conn.close()
     return row["workspace_path"] if row else None
+
+
+def set_chat_lumabot_mode(chat_id: str, enabled: bool) -> None:
+    """Persist the focused LumaBot profile for one conversation."""
+    if not chat_id:
+        return
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO chat_runtime_modes (chat_id, lumabot_enabled, updated_at) "
+        "VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
+        "lumabot_enabled = excluded.lumabot_enabled, updated_at = excluded.updated_at",
+        (str(chat_id), int(bool(enabled)), datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_lumabot_mode(chat_id: str | None) -> bool:
+    """Return whether this conversation uses the focused LumaBot profile."""
+    if not chat_id:
+        return False
+    conn = _connect()
+    row = conn.execute(
+        "SELECT lumabot_enabled FROM chat_runtime_modes WHERE chat_id = ?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    return bool(row["lumabot_enabled"]) if row else False
 
 
 def list_known_workspaces(limit: int = 10) -> list[str]:

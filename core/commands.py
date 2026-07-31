@@ -5,9 +5,20 @@ import os
 import sys
 from pathlib import Path
 
-from core.chat_store import delete_chat, list_chats, load_chat, make_title, new_chat_id, save_chat, set_active_chat
+from core.chat_store import (
+    delete_chat,
+    get_chat_lumabot_mode,
+    list_chats,
+    load_chat,
+    make_title,
+    new_chat_id,
+    save_chat,
+    set_active_chat,
+    set_chat_lumabot_mode,
+)
 from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
 from core.identity import CLI_USER_ID
+from core.runtime_config import apply_user_runtime
 from core.cli import BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, _c, render_storage_meter
 from core.menu import select_menu
 
@@ -25,6 +36,7 @@ def handle_command(command: str, agent, session: dict) -> bool:
         "/status": cmd_status,
         "/config": cmd_config,
         "/clear": cmd_clear,
+        "/lumabot": cmd_lumabot,
     }
 
     handler = handlers.get(cmd)
@@ -52,6 +64,7 @@ def cmd_help(args: str, agent, session: dict):
   {_c(CYAN, '/config')}               View current configuration
   {_c(CYAN, '/config set <k> <v>')}   Update a config value
   {_c(CYAN, '/clear')}                Clear the screen
+  {_c(CYAN, '/lumabot on|off')}       Toggle focused robot-control mode
 """)
 
 
@@ -96,7 +109,7 @@ def _chats_resume(chat_id: str, agent, session: dict):
     _auto_save(agent, session)
 
     # Load the resumed conversation
-    agent.messages = agent.apply_runtime_overrides(messages=chat["messages"])
+    agent.messages = chat["messages"]
     session["chat_id"] = chat["id"]
     session["title"] = chat["title"]
     session["first_message_sent"] = True
@@ -105,6 +118,7 @@ def _chats_resume(chat_id: str, agent, session: dict):
         session["chat_id"],
         scope=session.get("active_chat_scope"),
     )
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
 
     print(_c(GREEN, f"  Resumed: {chat['title']}"))
     print(_c(DIM, f"  {len(chat['messages'])} messages loaded.\n"))
@@ -135,6 +149,7 @@ def cmd_new(args: str, agent, session: dict):
         session["chat_id"],
         scope=session.get("active_chat_scope"),
     )
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
 
     print(_c(GREEN, "  New conversation started.\n"))
 
@@ -268,6 +283,24 @@ def _get_defaults(agent) -> dict:
 
 def cmd_clear(args: str, agent, session: dict):
     os.system("cls" if sys.platform == "win32" else "clear")
+
+
+def cmd_lumabot(args: str, agent, session: dict):
+    """Toggle the focused LumaBot profile for this CLI conversation."""
+    value = args.strip().lower()
+    current = get_chat_lumabot_mode(session.get("chat_id"))
+    if not value or value == "status":
+        print(_c(CYAN, f"  LumaBot mode: {'ON' if current else 'OFF'}\n"))
+        return
+    if value not in {"on", "off"}:
+        print(_c(RED, "  Usage: /lumabot on|off|status"))
+        return
+
+    enabled = value == "on"
+    set_chat_lumabot_mode(session.get("chat_id"), enabled)
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
+    state = "ON — only robot tools are available." if enabled else "OFF — full LumaKit restored."
+    print(_c(GREEN, f"  LumaBot mode {state}\n"))
 
 
 def _auto_save(agent, session: dict):

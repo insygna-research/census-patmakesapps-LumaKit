@@ -54,6 +54,20 @@ The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`, and
 are owner-only. Natural-language intent and the final acknowledgement remain
 part of LumaKit's normal LLM tool-result cycle; there is no phrase parser.
 
+Enable focused robot control for an individual conversation:
+
+```text
+Telegram: /lumabot on
+CLI:      /lumabot on
+Web:      click the LumaBot toggle in the top bar
+```
+
+This replaces the full agent prompt and 98-tool catalog with a compact robot
+prompt and only the four LumaBot tools. The setting follows that saved
+conversation and `/lumabot off` restores full LumaKit. “Park” currently stops
+scheduled movement and coasts both motors. Autonomous patrol remains
+unavailable until the distance sensor is connected and verified.
+
 After updating either checkout:
 
 ```bash

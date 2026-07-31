@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.chat_store import (
+    get_chat_lumabot_mode,
     list_chats,
     list_known_workspaces,
     load_chat,
@@ -12,6 +13,7 @@ from core.chat_store import (
     new_chat_id,
     save_chat,
     set_active_chat,
+    set_chat_lumabot_mode,
 )
 from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
 from core.identity import chat_owner_id
@@ -295,6 +297,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             lines.append("/model - choose the owner's Telegram model settings")
             lines.append("/workspace - pick or set the working directory (alias /dir)")
             lines.append("/safemode - toggle full machine access (approvals + file sandbox)")
+            lines.append("/lumabot - toggle focused robot-control mode")
             lines.append("/users - list authorized users")
         lines.append("/personality - view or change your Telegram personality override")
         send_message("\n".join(lines))
@@ -339,6 +342,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         agent.messages = [system_msg] if system_msg else []
         session["messages"] = agent.messages
         set_active_chat(owner_id, session["chat_id"])
+        apply_chat_runtime(agent, session, chat_id)
         send_message("New conversation started.")
         return True
 
@@ -364,6 +368,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
                 f"\nLocal model: {owner_cfg['local_model'] or 'not set'}"
                 f"\nWorkspace: {agent.workspace_root}"
                 f"\nSafe mode: {'on' if get_app_runtime_config().get('safe_mode', True) else 'off'}"
+                f"\nLumaBot mode: {'on' if get_chat_lumabot_mode(session.get('chat_id')) else 'off'}"
             )
         user_cfg = _get_user_config(chat_id)
         send_message(
@@ -385,8 +390,30 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         )
         return True
 
-    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role", "/approve", "/deny", "/workspace", "/dir", "/safemode"} and str(chat_id) != str(OWNER_ID):
+    if cmd in {"/adduser", "/removeuser", "/users", "/model", "/role", "/approve", "/deny", "/workspace", "/dir", "/safemode", "/lumabot"} and str(chat_id) != str(OWNER_ID):
         send_message("This command is owner-only.")
+        return True
+
+    if cmd == "/lumabot" and str(chat_id) == str(OWNER_ID):
+        value = args.strip().lower()
+        current = get_chat_lumabot_mode(session.get("chat_id"))
+        if not value or value == "status":
+            send_message(
+                f"LumaBot mode is {'ON' if current else 'OFF'}.\n"
+                "Use /lumabot on or /lumabot off."
+            )
+            return True
+        if value not in {"on", "off"}:
+            send_message("Usage: /lumabot on|off|status")
+            return True
+        enabled = value == "on"
+        set_chat_lumabot_mode(session.get("chat_id"), enabled)
+        apply_chat_runtime(agent, session, chat_id)
+        send_message(
+            "LumaBot mode ON. Only robot tools are available."
+            if enabled
+            else "LumaBot mode OFF. Full LumaKit is restored."
+        )
         return True
 
     if cmd == "/safemode" and str(chat_id) == str(OWNER_ID):

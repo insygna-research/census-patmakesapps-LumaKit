@@ -22,6 +22,7 @@ const $modelBadge = document.getElementById('model-badge');
 const $modelBadgeText = $modelBadge?.querySelector('.model-badge-text') || $modelBadge;
 const $statusLabel = document.getElementById('status-label');
 const $statusDot = document.getElementById('status-dot');
+const $lumabotModeBtn = document.getElementById('lumabot-mode-btn');
 const $workspaceForm = document.getElementById('workspace-form');
 const $workspaceInput = document.getElementById('workspace-input');
 const $workspaceBrowse = document.getElementById('workspace-browse');
@@ -50,6 +51,7 @@ let isWorking = false;
 let currentView = 'chat';
 let currentChatId = null;
 let currentWorkspacePath = '';
+let lumabotMode = false;
 let statusEl = null;
 let activityCardEl = null;
 let activityTitleEl = null;
@@ -229,6 +231,7 @@ function setWorking(working) {
     if ($workspaceInput) $workspaceInput.disabled = working;
     if ($workspaceBrowse) $workspaceBrowse.disabled = working;
     if ($photoBtn) $photoBtn.disabled = working;
+    if ($lumabotModeBtn) $lumabotModeBtn.disabled = working;
     // Type /stop to interrupt — no UI toggle needed
 }
 
@@ -246,6 +249,22 @@ function setWorkspace(path, displayPath) {
         $workspaceInput.value = currentWorkspacePath;
         $workspaceInput.title = displayPath || currentWorkspacePath || 'Working directory';
         $workspaceInput.setAttribute('aria-label', `Working directory: ${workspaceLabel(currentWorkspacePath)}`);
+    }
+}
+
+function setLumabotMode(enabled) {
+    lumabotMode = !!enabled;
+    $lumabotModeBtn?.classList.toggle('active', lumabotMode);
+    $lumabotModeBtn?.setAttribute('aria-pressed', String(lumabotMode));
+    if ($lumabotModeBtn) {
+        $lumabotModeBtn.title = lumabotMode
+            ? 'LumaBot mode is on — click to restore full LumaKit'
+            : 'Toggle focused LumaBot control mode';
+    }
+    if (!requiresModelSetup) {
+        $input.placeholder = lumabotMode
+            ? 'Tell LumaBot what to do...'
+            : 'Message Lumi... (type /stop to interrupt)';
     }
 }
 
@@ -275,7 +294,7 @@ function applySetupState() {
             switchView('settings');
         }
     } else {
-        $input.placeholder = 'Message Lumi... (type /stop to interrupt)';
+        setLumabotMode(lumabotMode);
         $setupOverlay.classList.add('hidden');
     }
 }
@@ -2330,6 +2349,12 @@ const ws = new WS({
 
     workspace_updated(data) {
         setWorkspace(data.workspace_path, data.workspace_display);
+        if (typeof data.lumabot_mode === 'boolean') setLumabotMode(data.lumabot_mode);
+    },
+
+    lumabot_mode(data) {
+        setLumabotMode(data.enabled);
+        if (data.text) showStatus(data.text);
     },
 
     workspace_error(data) {
@@ -2349,6 +2374,7 @@ const ws = new WS({
     },
 
     chat_loaded(data) {
+        if (typeof data.lumabot_mode === 'boolean') setLumabotMode(data.lumabot_mode);
         const previousChatId = currentChatId;
         if (data.chat_id === previousChatId && isWorking) {
             currentChatId = data.chat_id;
@@ -2608,6 +2634,11 @@ function sendMessage() {
 }
 
 $sendBtn.onclick = sendMessage;
+
+$lumabotModeBtn?.addEventListener('click', () => {
+    if (isWorking) return;
+    ws.send({ type: 'lumabot_mode', enabled: !lumabotMode });
+});
 
 document.querySelectorAll('.suggestion-card').forEach(card => {
     card.addEventListener('click', () => {

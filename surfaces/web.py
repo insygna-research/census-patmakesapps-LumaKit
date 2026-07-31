@@ -44,6 +44,7 @@ from core.chat_store import (
     new_chat_id,
     save_chat,
     set_active_chat,
+    set_chat_lumabot_mode,
     set_chat_workspace,
 )
 from core import notifications as notification_log
@@ -1222,11 +1223,13 @@ async def websocket_chat(ws: WebSocket):
             "chat_id": session["chat_id"],
             "title": session["title"],
             "messages": session["display_messages"],
+            "lumabot_mode": bool(session.get("lumabot_mode")),
             **_workspace_payload(session["workspace_path"]),
         })
     else:
         await ws.send_json({
             "type": "workspace_updated",
+            "lumabot_mode": bool(session.get("lumabot_mode")),
             **_workspace_payload(session["workspace_path"]),
         })
 
@@ -1287,6 +1290,7 @@ async def websocket_chat(ws: WebSocket):
                     "run_error": run_error,
                     "streamed": bool(response.get("streamed")),
                     "messages": session["display_messages"],
+                    "lumabot_mode": bool(session.get("lumabot_mode")),
                     **_workspace_payload(session["workspace_path"]),
                 })
         except Exception as e:
@@ -1383,6 +1387,30 @@ async def websocket_chat(ws: WebSocket):
                 })
                 continue
 
+            if msg_type == "lumabot_mode":
+                if agent_task and not agent_task.done():
+                    await ws.send_json({
+                        "type": "error",
+                        "text": "Finish or stop the current run before changing LumaBot mode.",
+                    })
+                    continue
+                enabled = data.get("enabled")
+                if not isinstance(enabled, bool):
+                    await ws.send_json({"type": "error", "text": "Invalid LumaBot mode value."})
+                    continue
+                set_chat_lumabot_mode(session["chat_id"], enabled)
+                _prepare_web_turn(agent, session)
+                await ws.send_json({
+                    "type": "lumabot_mode",
+                    "enabled": enabled,
+                    "text": (
+                        "LumaBot mode ON. Only robot tools are available."
+                        if enabled
+                        else "LumaBot mode OFF. Full LumaKit is restored."
+                    ),
+                })
+                continue
+
             # Load a specific chat
             if msg_type == "load_chat":
                 if agent_task and not agent_task.done():
@@ -1408,6 +1436,7 @@ async def websocket_chat(ws: WebSocket):
                         "chat_id": session["chat_id"],
                         "title": session["title"],
                         "messages": session["display_messages"],
+                        "lumabot_mode": bool(session.get("lumabot_mode")),
                         **_workspace_payload(session["workspace_path"]),
                     })
                 else:
@@ -1435,6 +1464,7 @@ async def websocket_chat(ws: WebSocket):
                     "chat_id": session["chat_id"],
                     "title": "",
                     "messages": [],
+                    "lumabot_mode": bool(session.get("lumabot_mode")),
                     **_workspace_payload(session["workspace_path"]),
                 })
                 continue

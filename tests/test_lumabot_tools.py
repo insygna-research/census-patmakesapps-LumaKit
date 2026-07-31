@@ -123,4 +123,5 @@ def test_stop_and_status_return_daemon_results(registry, monkeypatch):
     monkeypatch.setattr(client, "get_status", lambda: {"battery_pct": 75.0})
     assert registry.execute("lumabot_stop", {})["data"]["stopped"] is True
     assert registry.execute("lumabot_status", {})["data"]["battery_pct"] == 75.0
+    assert "park" in registry.get("lumabot_stop")["description"].lower()
     assert "human-friendly" in registry.get("lumabot_status")["description"]

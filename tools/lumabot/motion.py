@@ -256,8 +256,9 @@ def get_lumabot_stop_tool():
         "name": "lumabot_stop",
         "description": (
             "Immediately stop LumaBot and release both motors. Use whenever the user asks the "
-            "robot not to move, to stop now, or to cancel current movement. Confirm the stop "
-            "briefly and naturally without reciting internal motor values."
+            "robot not to move, to stop now, to park, or to cancel current movement. Parking "
+            "currently means stopping, cancelling scheduled motion, and coasting both motors. "
+            "Confirm the stop briefly and naturally without reciting internal motor values."
         ),
         "inputSchema": {"type": "object", "properties": {}},
         "execute": lambda inputs: SCHEDULER.stop(),
