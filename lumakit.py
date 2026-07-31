@@ -595,7 +595,11 @@ def command_service_install(args) -> int:
     target = _service_install_target(args)
     working_dir = Path(args.working_dir).expanduser().resolve() if args.working_dir else REPO_ROOT
     env_file = Path(args.env_file).expanduser().resolve(strict=False) if args.env_file else working_dir / ".env"
-    python_executable = Path(args.python).expanduser().resolve() if args.python else Path(sys.executable).resolve()
+    python_executable = (
+        Path(args.python).expanduser().absolute()
+        if args.python
+        else Path(sys.executable).absolute()
+    )
     user = args.user or getpass.getuser()
     service_text = _render_systemd_service(
         user=user,
