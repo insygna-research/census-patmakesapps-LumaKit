@@ -23,6 +23,7 @@ from tool_registry import ToolRegistry
 from core.summarizer import apply_summary, build_summary_request, needs_summarization
 from core.storage import StorageManager
 from tools.code_intel.code_index import LazyCodeIndex, update_index_after_tool
+from tools.lumabot.activity import LumaBotActivityLease
 
 
 # Tools that modify files — require diff preview + confirmation
@@ -931,6 +932,8 @@ class Agent:
                 prompt or ("Image analysis" if has_image else ""),
                 kind="vision" if has_image else "chat",
             )
+            activity_lease = LumaBotActivityLease()
+            activity_lease.start()
             watchdog = StallWatchdog(
                 self.run_controller,
                 notify=lambda text: self.display.status(text),
@@ -1243,6 +1246,8 @@ class Agent:
                 watchdog.stop()
                 self.run_controller.finish_run("failed", error=str(exc))
                 raise
+            finally:
+                activity_lease.close()
 
     SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 

@@ -54,6 +54,10 @@ The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`, and
 are owner-only. Natural-language intent and the final acknowledgement remain
 part of LumaKit's normal LLM tool-result cycle; there is no phrase parser.
 
+Set `LUMABOT_ACTIVITY_INDICATOR=1` on the Pi service to let interactive Agent
+turns renew the LumaBot NeoSlider's purple thinking lease. Remote mode makes no
+LLM call and therefore does not activate the thinking indicator.
+
 Choose a robot-control profile for an individual conversation:
 
 ```text
