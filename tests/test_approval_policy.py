@@ -20,6 +20,12 @@ def test_protected_write_tools_always_require_approval():
         assert tool_always_requires_approval(tool, {})
 
 
+def test_robot_power_tools_always_require_owner_approval():
+    for tool in ("lumabot_reboot", "lumabot_poweroff"):
+        assert tool_always_requires_approval(tool, {"reason": "owner requested"})
+        assert autonomous_tool_refusal(tool, {"reason": "owner requested"}) is not None
+
+
 def test_read_tools_do_not_require_forced_approval():
     assert not tool_always_requires_approval("read_file", {"path": "x"})
     assert not tool_always_requires_approval("web_search", {"query": "x"})
@@ -71,6 +77,8 @@ def test_telegram_role_scoping():
         assert surface_tool_denial("lumabot_drive") is not None
         assert surface_tool_denial("lumabot_sequence") is not None
         assert surface_tool_denial("lumabot_stop") is not None
+        assert surface_tool_denial("lumabot_reboot") is not None
+        assert surface_tool_denial("lumabot_poweroff") is not None
         assert surface_tool_denial("lumabot_status") is None
         assert surface_tool_denial("read_file") is None
 

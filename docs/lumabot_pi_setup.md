@@ -49,10 +49,26 @@ The unit enables the Adafruit Motor Bonnet and X1200 battery gauge. Verify the
 robot is raised on a stand before testing movement. The present mapping is
 Motor 1 = left (software-inverted) and Motor 4 = right.
 
-The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`, and
-`lumabot_stop` tools call this service through `LUMABOT_URL`. Movement tools
-are owner-only. Natural-language intent and the final acknowledgement remain
-part of LumaKit's normal LLM tool-result cycle; there is no phrase parser.
+The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`,
+`lumabot_stop`, `lumabot_reboot`, and `lumabot_poweroff` tools control the
+robot. Movement and whole-Pi power tools are owner-only. Reboot and poweroff
+also always require interactive confirmation and are refused in autonomous
+tasks. Natural-language intent and the final acknowledgement remain part of
+LumaKit's normal LLM tool-result cycle; there is no phrase parser.
+
+Install the exact power-command policy and validate it before restarting
+LumaKit:
+
+```bash
+sudo install -o root -g root -m 0440 \
+  deploy/lumabot-power.sudoers /etc/sudoers.d/lumabot-power
+sudo visudo -cf /etc/sudoers.d/lumabot-power
+```
+
+These tools stop the motors first, then use a fixed `systemd-run` command to
+schedule the requested action 15 seconds later. The LLM-provided reason is
+never included in the command. The policy deliberately does not grant general
+`systemctl`, shell, or arbitrary `sudo` access.
 
 Set `LUMABOT_ACTIVITY_INDICATOR=1` on the Pi service to let interactive Agent
 turns renew the LumaBot NeoSlider's purple thinking lease. Remote mode makes no

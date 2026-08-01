@@ -38,6 +38,8 @@ CONFIRM_TOOLS = {
     "git_add",
     "git_commit",
     "git_push",
+    "lumabot_reboot",
+    "lumabot_poweroff",
 }
 
 # Tools that have a built-in preview/confirm flow — always preview first
@@ -547,6 +549,8 @@ class Agent:
             "structured tool; there is no phrase parser. Use lumabot_drive once for one "
             "continuous movement, lumabot_sequence once for an ordered multi-step request, "
             "lumabot_stop to stop, and lumabot_status for hardware or battery questions. "
+            "Use lumabot_reboot or lumabot_poweroff only for the owner's explicit whole-robot "
+            "power request; those actions require confirmation. "
             "Never repeat movement after a result says entire_request_scheduled=true. "
             "Treat returned safety and readiness fields as authoritative and never claim "
             "obstacle protection is active when it is not. Autonomous patrol is unavailable "

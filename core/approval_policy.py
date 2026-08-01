@@ -33,6 +33,8 @@ ALWAYS_CONFIRM_TOOLS = frozenset({
     "execute_shell",
     "execute_python",
     "run_command",
+    "lumabot_reboot",
+    "lumabot_poweroff",
 })
 
 # Tools an autonomous task may never execute (it has no way to ask).
@@ -41,6 +43,8 @@ AUTONOMOUS_REFUSED_TOOLS = frozenset({
     "git_add",
     "git_commit",
     "git_push",
+    "lumabot_reboot",
+    "lumabot_poweroff",
 })
 
 # Screens shell commands issued from inside autonomous tasks. This is a
@@ -133,6 +137,8 @@ OWNER_ONLY_TOOLS = frozenset({
     # system control / destructive maintenance
     "reboot_system",
     "restart_service",
+    "lumabot_reboot",
+    "lumabot_poweroff",
     "clear_storage",
     # secrets manager
     "lumalok_list_secrets",

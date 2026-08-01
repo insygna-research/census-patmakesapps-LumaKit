@@ -1,0 +1,5 @@
+# Exact commands used by tools/lumabot/power.py. Do not grant arbitrary systemctl.
+Cmnd_Alias LUMABOT_POWER = /usr/bin/systemd-run --quiet --collect --unit=lumabot-reboot --on-active=15s /usr/bin/systemctl reboot, \
+    /usr/bin/systemd-run --quiet --collect --unit=lumabot-poweroff --on-active=15s /usr/bin/systemctl poweroff
+
+lumabot21 ALL=(root) NOPASSWD: LUMABOT_POWER
