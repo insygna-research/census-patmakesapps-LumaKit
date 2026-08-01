@@ -40,6 +40,7 @@ CONFIRM_TOOLS = {
     "git_push",
     "lumabot_reboot",
     "lumabot_poweroff",
+    "lumabot_start_autonomy",
 }
 
 # Tools that have a built-in preview/confirm flow — always preview first
@@ -548,7 +549,8 @@ class Agent:
             "Interpret the user's natural-language intent yourself and call the appropriate "
             "structured tool; there is no phrase parser. Use lumabot_drive once for one "
             "continuous movement, lumabot_sequence once for an ordered multi-step request, "
-            "lumabot_stop to stop, and lumabot_status for hardware or battery questions. "
+            "lumabot_start_autonomy only for an explicit roaming request, lumabot_stop to stop "
+            "manual or autonomous movement, and lumabot_status for hardware or battery questions. "
             "Use lumabot_reboot or lumabot_poweroff only for the owner's explicit whole-robot "
             "power request; those actions require confirmation. "
             "Never repeat movement after a result says entire_request_scheduled=true. "

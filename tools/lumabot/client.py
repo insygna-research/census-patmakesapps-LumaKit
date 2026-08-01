@@ -51,6 +51,10 @@ def stop() -> dict:
     return _request("POST", "/stop")
 
 
+def start_autonomy() -> dict:
+    return _request("POST", "/autonomy", {"active": True})
+
+
 def set_indicator_activity(lease_id: str, active: bool, ttl_s: float) -> dict:
     return _request(
         "POST",

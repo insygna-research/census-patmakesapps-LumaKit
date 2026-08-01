@@ -45,16 +45,24 @@ sudo systemctl enable --now lumabot.service
 curl -fsS http://127.0.0.1:8971/status
 ```
 
-The unit enables the Adafruit Motor Bonnet and X1200 battery gauge. Verify the
-robot is raised on a stand before testing movement. The present mapping is
-Motor 1 = left (software-inverted) and Motor 4 = right.
+The unit enables the Adafruit Motor Bonnet, X1200 battery gauge, NeoSlider,
+VL53L1X, and MSA311. Verify the robot is raised on a stand before testing
+movement. The present mapping is Motor 1 = left (software-inverted) and Motor 4
+= right.
 
 The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`,
-`lumabot_stop`, `lumabot_reboot`, and `lumabot_poweroff` tools control the
+`lumabot_stop`, `lumabot_start_autonomy`, `lumabot_reboot`, and
+`lumabot_poweroff` tools control the
 robot. Movement and whole-Pi power tools are owner-only. Reboot and poweroff
 also always require interactive confirmation and are refused in autonomous
 tasks. Natural-language intent and the final acknowledgement remain part of
 LumaKit's normal LLM tool-result cycle; there is no phrase parser.
+
+Autonomous driving runs locally in the LumaBot daemon and continues without an
+LLM round trip. Starting it through LumaKit requires owner confirmation; the
+physical MSA311 double-tap gesture can also toggle it. `lumabot_stop`, manual
+movement, stale distance data, excessive tilt, low battery, and daemon shutdown
+all cancel or block autonomous motor output.
 
 Install the exact power-command policy and validate it before restarting
 LumaKit:

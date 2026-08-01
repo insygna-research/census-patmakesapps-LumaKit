@@ -6,6 +6,7 @@ import pytest
 
 from tool_registry import ToolRegistry
 from tools.lumabot import client
+from tools.lumabot.autonomy import get_lumabot_start_autonomy_tool
 from tools.lumabot.motion import (
     MotionScheduler,
     SCHEDULER,
@@ -24,6 +25,7 @@ def registry():
         get_lumabot_sequence_tool(),
         get_lumabot_stop_tool(),
         get_lumabot_status_tool(),
+        get_lumabot_start_autonomy_tool(),
     ):
         result.register(tool, group="lumabot")
     return result
@@ -163,3 +165,18 @@ def test_stop_and_status_return_daemon_results(registry, monkeypatch):
     assert registry.execute("lumabot_status", {})["data"]["battery_pct"] == 75.0
     assert "park" in registry.get("lumabot_stop")["description"].lower()
     assert "human-friendly" in registry.get("lumabot_status")["description"]
+
+
+def test_autonomy_uses_structured_daemon_action(registry, monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "start_autonomy",
+        lambda: {"accepted": True, "status": {"autonomous": True}},
+    )
+    result = registry.execute(
+        "lumabot_start_autonomy",
+        {"reason": "owner asked the robot to explore"},
+    )
+    assert result["success"] is True
+    assert result["data"]["status"]["autonomous"] is True
+    assert "always requires approval" in registry.get("lumabot_start_autonomy")["description"]
