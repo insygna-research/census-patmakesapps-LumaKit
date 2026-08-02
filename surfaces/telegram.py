@@ -37,7 +37,13 @@ from core.telegram_api import (
     send_chat_action,
     telegram_api,
 )
-from core.telegram_commands import apply_chat_runtime, handle_telegram_command, swap_in
+from core.telegram_commands import (
+    apply_chat_runtime,
+    handle_lumabot_callback,
+    handle_telegram_command,
+    lumabot_remote_keyboard,
+    swap_in,
+)
 from core.telegram_io import edit_message_text, send_message, send_tts_reply, telegram_confirm
 from core.telegram_speech import SpeechClient
 from core.telegram_state import (
@@ -53,6 +59,7 @@ from core.telegram_state import (
     _sessions,
 )
 from tools.comms.react import set_react_context
+from tools.lumabot.remote import execute_remote_command
 from tools.memory.memory_tools import set_active_user
 
 # ---------------------------------------------------------------------------
@@ -307,6 +314,29 @@ def _poll_active_run_messages(agent: Agent) -> bool:
 
     for update in updates:
         _poll_offset["value"] = update["update_id"] + 1
+        callback = update.get("callback_query", {})
+        callback_data = callback.get("data", "")
+        callback_chat_id = str(
+            callback.get("message", {}).get("chat", {}).get("id", "")
+        )
+        if callback_data.startswith("lbot:") and callback_chat_id == str(chat_id):
+            callback_session = _get_session(callback_chat_id)
+            result = handle_lumabot_callback(callback_data, callback_session)
+            try:
+                telegram_api(
+                    "answerCallbackQuery",
+                    {
+                        "callback_query_id": callback.get("id"),
+                        "text": result["text"][:200],
+                        "show_alert": not result.get("ok", False),
+                    },
+                )
+            except Exception:
+                pass
+            if callback_data in {"lbot:stop", "lbot:park"}:
+                agent.request_stop("LumaBot emergency stop requested.")
+            continue
+
         msg = update.get("message", {})
         msg_chat_id = str(msg.get("chat", {}).get("id", ""))
         text = msg.get("text", "").strip()
@@ -320,6 +350,11 @@ def _poll_active_run_messages(agent: Agent) -> bool:
 
         # Slash commands are still handled by the command dispatcher.
         if text.startswith("/"):
+            if text.strip().lower() in {"/lumabot stop", "/lumabot park"}:
+                result = execute_remote_command(text.split(maxsplit=1)[1])
+                send_message(result["text"], chat_id=msg_chat_id)
+                agent.request_stop("LumaBot emergency stop requested.")
+                continue
             _pending_updates.append(update)
             continue
 
@@ -492,6 +527,43 @@ def run(
                 if _poll_offset["value"] is None or new_offset > _poll_offset["value"]:
                     _poll_offset["value"] = new_offset
 
+                callback = update.get("callback_query", {})
+                if callback:
+                    callback_id = callback.get("id")
+                    callback_data = callback.get("data", "")
+                    callback_chat_id = str(
+                        callback.get("message", {}).get("chat", {}).get("id", "")
+                    )
+                    if callback_data.startswith("lbot:") and callback_chat_id:
+                        if callback_chat_id != str(OWNER_ID):
+                            result = {"ok": False, "text": "Owner-only control."}
+                        else:
+                            _active_chat_id["value"] = callback_chat_id
+                            set_active_user(callback_chat_id)
+                            auth.set_active_user(callback_chat_id)
+                            set_interface("telegram", callback_chat_id)
+                            service.notify_activity()
+                            callback_session = _get_session(callback_chat_id)
+                            swap_in(agent, callback_session)
+                            apply_chat_runtime(agent, callback_session, callback_chat_id)
+                            result = handle_lumabot_callback(
+                                callback_data,
+                                callback_session,
+                            )
+                        try:
+                            telegram_api(
+                                "answerCallbackQuery",
+                                {
+                                    "callback_query_id": callback_id,
+                                    "text": result["text"][:200],
+                                    "show_alert": not result.get("ok", False),
+                                },
+                            )
+                        except Exception:
+                            pass
+                        print(f"[LumaBot remote] {callback_data}: {result['text']}")
+                    continue
+
                 msg = update.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text = msg.get("text", "").strip()
@@ -529,9 +601,17 @@ def run(
                 session = _get_session(chat_id)
                 swap_in(agent, session)
                 apply_chat_runtime(agent, session, chat_id)
+                remote_mode = session.get("lumabot_mode") == "remote"
 
                 # Photo
                 if has_photo:
+                    if remote_mode:
+                        send_message(
+                            "Remote mode does not send photos to an LLM. Use the controls "
+                            "below or switch with /lumabot agent.",
+                            reply_markup=lumabot_remote_keyboard(),
+                        )
+                        continue
                     print(f"[{user_name}] [photo] {caption or '(no caption)'}")
                     file_id = photo_list[-1]["file_id"]
                     image_data = download_telegram_photo(file_id)
@@ -563,6 +643,13 @@ def run(
 
                 # Voice / audio
                 if has_audio:
+                    if remote_mode:
+                        send_message(
+                            "Remote mode does not transcribe voice commands. Use the controls "
+                            "below or switch with /lumabot agent.",
+                            reply_markup=lumabot_remote_keyboard(),
+                        )
+                        continue
                     label = "[voice]" if voice else "[audio]"
                     print(f"[{user_name}] {label} {caption or '(no caption)'}")
                     media = voice or audio or {}
@@ -613,6 +700,14 @@ def run(
                 if text.startswith("/"):
                     if handle_telegram_command(text, agent, session, chat_id, speech_client):
                         continue
+
+                if remote_mode:
+                    send_message(
+                        "Remote mode only accepts the structured controls below. "
+                        "Use /lumabot agent for natural language.",
+                        reply_markup=lumabot_remote_keyboard(),
+                    )
+                    continue
 
                 try:
                     try:

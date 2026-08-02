@@ -7,8 +7,8 @@ httpx==0.28.1
 aiohttp==3.13.5
 beautifulsoup4==4.14.3
 Pillow==12.2.0
-tree-sitter==0.21.3
-tree-sitter-languages==1.10.2
+tree-sitter==0.26.0
+tree-sitter-language-pack==1.13.2
 PyYAML==6.0.3
 regex==2026.4.4
 fastapi==0.136.1

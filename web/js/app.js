@@ -22,6 +22,12 @@ const $modelBadge = document.getElementById('model-badge');
 const $modelBadgeText = $modelBadge?.querySelector('.model-badge-text') || $modelBadge;
 const $statusLabel = document.getElementById('status-label');
 const $statusDot = document.getElementById('status-dot');
+const $lumabotModeSelect = document.getElementById('lumabot-mode-select');
+const $lumabotEstopBtn = document.getElementById('lumabot-estop-btn');
+const $lumabotRemoteControls = document.getElementById('lumabot-remote-controls');
+const $lumabotDuration = document.getElementById('lumabot-duration');
+const $lumabotSpeed = document.getElementById('lumabot-speed');
+const $suggestionCards = document.getElementById('suggestion-cards');
 const $workspaceForm = document.getElementById('workspace-form');
 const $workspaceInput = document.getElementById('workspace-input');
 const $workspaceBrowse = document.getElementById('workspace-browse');
@@ -50,6 +56,7 @@ let isWorking = false;
 let currentView = 'chat';
 let currentChatId = null;
 let currentWorkspacePath = '';
+let lumabotMode = 'off';
 let statusEl = null;
 let activityCardEl = null;
 let activityTitleEl = null;
@@ -229,6 +236,7 @@ function setWorking(working) {
     if ($workspaceInput) $workspaceInput.disabled = working;
     if ($workspaceBrowse) $workspaceBrowse.disabled = working;
     if ($photoBtn) $photoBtn.disabled = working;
+    if ($lumabotModeSelect) $lumabotModeSelect.disabled = working;
     // Type /stop to interrupt — no UI toggle needed
 }
 
@@ -246,6 +254,29 @@ function setWorkspace(path, displayPath) {
         $workspaceInput.value = currentWorkspacePath;
         $workspaceInput.title = displayPath || currentWorkspacePath || 'Working directory';
         $workspaceInput.setAttribute('aria-label', `Working directory: ${workspaceLabel(currentWorkspacePath)}`);
+    }
+}
+
+function setLumabotMode(mode) {
+    if (typeof mode === 'boolean') mode = mode ? 'agent' : 'off';
+    lumabotMode = ['off', 'agent', 'remote'].includes(mode) ? mode : 'off';
+    if ($lumabotModeSelect) {
+        $lumabotModeSelect.value = lumabotMode;
+        $lumabotModeSelect.classList.toggle('agent', lumabotMode === 'agent');
+        $lumabotModeSelect.classList.toggle('remote', lumabotMode === 'remote');
+    }
+    const remote = lumabotMode === 'remote';
+    $lumabotRemoteControls?.classList.toggle('hidden', !remote);
+    $suggestionCards?.classList.toggle('hidden', remote);
+    $input.disabled = requiresModelSetup || remote;
+    $sendBtn.disabled = requiresModelSetup || remote;
+    if ($photoBtn) $photoBtn.disabled = requiresModelSetup || remote || isWorking;
+    if (!requiresModelSetup) {
+        $input.placeholder = remote
+            ? 'Remote mode uses the controls above — no LLM calls'
+            : lumabotMode === 'agent'
+                ? 'Tell LumaBot what to do...'
+                : 'Message Lumi... (type /stop to interrupt)';
     }
 }
 
@@ -275,7 +306,7 @@ function applySetupState() {
             switchView('settings');
         }
     } else {
-        $input.placeholder = 'Message Lumi... (type /stop to interrupt)';
+        setLumabotMode(lumabotMode);
         $setupOverlay.classList.add('hidden');
     }
 }
@@ -2330,6 +2361,16 @@ const ws = new WS({
 
     workspace_updated(data) {
         setWorkspace(data.workspace_path, data.workspace_display);
+        if (data.lumabot_mode != null) setLumabotMode(data.lumabot_mode);
+    },
+
+    lumabot_mode(data) {
+        setLumabotMode(data.mode);
+        if (data.text) showStatus(data.text);
+    },
+
+    lumabot_control(data) {
+        showStatus(data.text || (data.ok ? 'LumaBot command accepted.' : 'LumaBot command failed.'));
     },
 
     workspace_error(data) {
@@ -2349,6 +2390,7 @@ const ws = new WS({
     },
 
     chat_loaded(data) {
+        if (data.lumabot_mode != null) setLumabotMode(data.lumabot_mode);
         const previousChatId = currentChatId;
         if (data.chat_id === previousChatId && isWorking) {
             currentChatId = data.chat_id;
@@ -2590,6 +2632,10 @@ function sendMessage() {
         switchView('settings');
         return;
     }
+    if (lumabotMode === 'remote') {
+        showStatus('Use the LumaBot Remote controls above.');
+        return;
+    }
 
     // Only reset the activity card when starting a fresh turn — if the agent
     // is still working, the user's new message is queued alongside the
@@ -2608,6 +2654,30 @@ function sendMessage() {
 }
 
 $sendBtn.onclick = sendMessage;
+
+$lumabotModeSelect?.addEventListener('change', () => {
+    if (isWorking) return;
+    const requestedMode = $lumabotModeSelect.value;
+    $lumabotModeSelect.value = lumabotMode;
+    ws.send({ type: 'lumabot_mode', mode: requestedMode });
+});
+
+$lumabotEstopBtn?.addEventListener('click', () => {
+    ws.send({ type: 'lumabot_control', action: 'stop' });
+});
+
+$lumabotRemoteControls?.querySelectorAll('button[data-action]').forEach(button => {
+    button.addEventListener('click', () => {
+        ws.send({
+            type: 'lumabot_control',
+            action: button.dataset.action,
+            direction: button.dataset.direction || null,
+            duration_s: Number($lumabotDuration?.value || 1),
+            speed: Number($lumabotSpeed?.value || 0.3),
+            continuous: button.dataset.action === 'drive',
+        });
+    });
+});
 
 document.querySelectorAll('.suggestion-card').forEach(card => {
     card.addEventListener('click', () => {

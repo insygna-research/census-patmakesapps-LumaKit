@@ -3,7 +3,8 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="tree_sitter")
 
-import tree_sitter_languages as tsl
+from tree_sitter import Query, QueryCursor
+import tree_sitter_language_pack as tsl
 
 from tools.code_intel.symbol_table import Reference, Symbol, SymbolTable
 
@@ -87,6 +88,15 @@ def _get_parser(language: str):
 
 def _get_language(language: str):
     return tsl.get_language(language)
+
+
+def _query_captures(language, query: str, root_node):
+    captures = QueryCursor(Query(language, query)).captures(root_node)
+    return [
+        (node, capture_name)
+        for capture_name, nodes in captures.items()
+        for node in nodes
+    ]
 
 
 def _extract_params_python(node) -> list[str]:
@@ -257,8 +267,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
 
     # --- Extract classes ---
     if "classes" in queries:
-        q = lang.query(queries["classes"])
-        captures = q.captures(tree.root_node)
+        captures = _query_captures(lang, queries["classes"], tree.root_node)
         for node, capture_name in captures:
             if capture_name != "definition":
                 continue
@@ -286,8 +295,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
     for query_key, sym_kind in [("structs", "class"), ("interfaces", "class"),
                                  ("enums", "class"), ("traits", "class")]:
         if query_key in queries:
-            q = lang.query(queries[query_key])
-            captures = q.captures(tree.root_node)
+            captures = _query_captures(lang, queries[query_key], tree.root_node)
             for node, capture_name in captures:
                 if capture_name != "definition":
                     continue
@@ -315,8 +323,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
 
     # --- Extract functions ---
     if "functions" in queries:
-        q = lang.query(queries["functions"])
-        captures = q.captures(tree.root_node)
+        captures = _query_captures(lang, queries["functions"], tree.root_node)
         for node, capture_name in captures:
             if capture_name != "definition":
                 continue
@@ -352,8 +359,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
 
     # --- Extract Go methods (with receiver) ---
     if "go_methods" in queries:
-        q = lang.query(queries["go_methods"])
-        captures = q.captures(tree.root_node)
+        captures = _query_captures(lang, queries["go_methods"], tree.root_node)
         for node, capture_name in captures:
             if capture_name != "definition":
                 continue
@@ -383,8 +389,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
 
     # --- Extract methods (JS/TS) ---
     if "methods" in queries:
-        q = lang.query(queries["methods"])
-        captures = q.captures(tree.root_node)
+        captures = _query_captures(lang, queries["methods"], tree.root_node)
         for node, capture_name in captures:
             if capture_name != "definition":
                 continue
@@ -414,8 +419,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
 
     # --- Extract arrow functions (JS/TS) ---
     if "arrows" in queries:
-        q = lang.query(queries["arrows"])
-        captures = q.captures(tree.root_node)
+        captures = _query_captures(lang, queries["arrows"], tree.root_node)
         for node, capture_name in captures:
             if capture_name == "name":
                 symbols.append(Symbol(
@@ -433,8 +437,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
         if isinstance(import_queries, str):
             import_queries = [import_queries]
         for iq in import_queries:
-            q = lang.query(iq)
-            captures = q.captures(tree.root_node)
+            captures = _query_captures(lang, iq, tree.root_node)
             for node, capture_name in captures:
                 line_num = node.start_point[0] + 1
                 text = node.text.decode("utf-8").strip()
@@ -447,8 +450,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
 
     # --- Extract top-level assignments (variables/constants) ---
     if "assignments" in queries:
-        q = lang.query(queries["assignments"])
-        captures = q.captures(tree.root_node)
+        captures = _query_captures(lang, queries["assignments"], tree.root_node)
         for node, capture_name in captures:
             if capture_name == "name":
                 # Only top-level assignments (parent is module/program)
@@ -471,8 +473,7 @@ def parse_file(file_path: str, source: str | None = None) -> tuple[list[Symbol],
     # --- Extract Go/Rust vars, consts, statics ---
     for query_key in ("go_vars", "go_consts", "rust_consts", "rust_statics"):
         if query_key in queries:
-            q = lang.query(queries[query_key])
-            captures = q.captures(tree.root_node)
+            captures = _query_captures(lang, queries[query_key], tree.root_node)
             for node, capture_name in captures:
                 if capture_name == "name":
                     var_name = node.text.decode("utf-8")

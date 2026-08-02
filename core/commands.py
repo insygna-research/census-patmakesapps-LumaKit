@@ -5,11 +5,23 @@ import os
 import sys
 from pathlib import Path
 
-from core.chat_store import delete_chat, list_chats, load_chat, make_title, new_chat_id, save_chat, set_active_chat
+from core.chat_store import (
+    delete_chat,
+    get_chat_lumabot_profile,
+    list_chats,
+    load_chat,
+    make_title,
+    new_chat_id,
+    save_chat,
+    set_active_chat,
+    set_chat_lumabot_profile,
+)
 from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
 from core.identity import CLI_USER_ID
+from core.runtime_config import apply_user_runtime
 from core.cli import BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, _c, render_storage_meter
 from core.menu import select_menu
+from tools.lumabot.remote import REMOTE_HELP, execute_remote_command
 
 
 def handle_command(command: str, agent, session: dict) -> bool:
@@ -25,6 +37,7 @@ def handle_command(command: str, agent, session: dict) -> bool:
         "/status": cmd_status,
         "/config": cmd_config,
         "/clear": cmd_clear,
+        "/lumabot": cmd_lumabot,
     }
 
     handler = handlers.get(cmd)
@@ -52,6 +65,9 @@ def cmd_help(args: str, agent, session: dict):
   {_c(CYAN, '/config')}               View current configuration
   {_c(CYAN, '/config set <k> <v>')}   Update a config value
   {_c(CYAN, '/clear')}                Clear the screen
+  {_c(CYAN, '/lumabot agent')}        Natural-language robot control
+  {_c(CYAN, '/lumabot remote')}       Instant structured robot controls
+  {_c(CYAN, '/lumabot off')}          Restore full LumaKit
 """)
 
 
@@ -96,7 +112,7 @@ def _chats_resume(chat_id: str, agent, session: dict):
     _auto_save(agent, session)
 
     # Load the resumed conversation
-    agent.messages = agent.apply_runtime_overrides(messages=chat["messages"])
+    agent.messages = chat["messages"]
     session["chat_id"] = chat["id"]
     session["title"] = chat["title"]
     session["first_message_sent"] = True
@@ -105,6 +121,7 @@ def _chats_resume(chat_id: str, agent, session: dict):
         session["chat_id"],
         scope=session.get("active_chat_scope"),
     )
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
 
     print(_c(GREEN, f"  Resumed: {chat['title']}"))
     print(_c(DIM, f"  {len(chat['messages'])} messages loaded.\n"))
@@ -135,6 +152,7 @@ def cmd_new(args: str, agent, session: dict):
         session["chat_id"],
         scope=session.get("active_chat_scope"),
     )
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
 
     print(_c(GREEN, "  New conversation started.\n"))
 
@@ -268,6 +286,38 @@ def _get_defaults(agent) -> dict:
 
 def cmd_clear(args: str, agent, session: dict):
     os.system("cls" if sys.platform == "win32" else "clear")
+
+
+def cmd_lumabot(args: str, agent, session: dict):
+    """Switch profiles or execute one deterministic remote command."""
+    parts = args.strip().split(maxsplit=1)
+    action = parts[0].lower() if parts else ""
+    current = get_chat_lumabot_profile(session.get("chat_id"))
+    if not action:
+        print(_c(CYAN, f"  LumaBot mode: {current.upper()}\n\n{REMOTE_HELP}\n"))
+        return
+
+    if action in {"on", "agent", "remote", "off"}:
+        profile = "agent" if action == "on" else action
+        set_chat_lumabot_profile(session.get("chat_id"), profile)
+        apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
+        labels = {
+            "agent": "AGENT — natural language uses the configured LLM.",
+            "remote": "REMOTE — structured commands bypass the LLM.",
+            "off": "OFF — full LumaKit restored.",
+        }
+        print(_c(GREEN, f"  LumaBot mode {labels[profile]}\n"))
+        if profile == "remote":
+            print(f"{REMOTE_HELP}\n")
+        return
+
+    if action not in {"stop", "park", "status", "help"} and current != "remote":
+        print(_c(RED, "  Switch to Remote mode first with /lumabot remote.\n"))
+        return
+    result = execute_remote_command(args)
+    prefix = f"LumaBot mode: {current.upper()}\n" if action == "status" else ""
+    color = GREEN if result.get("ok") else RED
+    print(_c(color, f"  {prefix}{result['text']}\n"))
 
 
 def _auto_save(agent, session: dict):

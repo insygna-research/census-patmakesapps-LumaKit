@@ -49,6 +49,26 @@ def _connect():
             updated_at TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_runtime_modes (
+            chat_id TEXT PRIMARY KEY,
+            lumabot_enabled INTEGER NOT NULL DEFAULT 0,
+            profile TEXT NOT NULL DEFAULT 'off',
+            updated_at TEXT NOT NULL
+        )
+    """)
+    mode_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(chat_runtime_modes)")
+    }
+    if "profile" not in mode_columns:
+        conn.execute(
+            "ALTER TABLE chat_runtime_modes "
+            "ADD COLUMN profile TEXT NOT NULL DEFAULT 'off'"
+        )
+        conn.execute(
+            "UPDATE chat_runtime_modes SET profile = "
+            "CASE WHEN lumabot_enabled = 1 THEN 'agent' ELSE 'off' END"
+        )
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "owner_id" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN owner_id TEXT")
@@ -214,6 +234,7 @@ def delete_chat(chat_id: str, owner_id: str | None = None) -> bool:
         )
     if cursor.rowcount > 0:
         conn.execute("DELETE FROM chat_workspaces WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM chat_runtime_modes WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
     return cursor.rowcount > 0
@@ -249,6 +270,59 @@ def get_chat_workspace(chat_id: str, owner_id: str | None = None) -> str | None:
         ).fetchone()
     conn.close()
     return row["workspace_path"] if row else None
+
+
+def set_chat_lumabot_mode(chat_id: str, enabled: bool) -> None:
+    """Backward-compatible agent/off toggle."""
+    set_chat_lumabot_profile(chat_id, "agent" if enabled else "off")
+
+
+def get_chat_lumabot_mode(chat_id: str | None) -> bool:
+    """Backward-compatible check for Agent mode."""
+    return get_chat_lumabot_profile(chat_id) == "agent"
+
+
+def set_chat_lumabot_profile(chat_id: str, profile: str) -> None:
+    """Persist off, agent, or direct remote control for one conversation."""
+    if not chat_id:
+        return
+    profile = str(profile or "").lower()
+    if profile not in {"off", "agent", "remote"}:
+        raise ValueError("LumaBot profile must be off, agent, or remote")
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO chat_runtime_modes "
+        "(chat_id, lumabot_enabled, profile, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET "
+        "lumabot_enabled = excluded.lumabot_enabled, "
+        "profile = excluded.profile, updated_at = excluded.updated_at",
+        (
+            str(chat_id),
+            int(profile == "agent"),
+            profile,
+            datetime.now().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_lumabot_profile(chat_id: str | None) -> str:
+    """Return off, agent, or remote for this conversation."""
+    if not chat_id:
+        return "off"
+    conn = _connect()
+    row = conn.execute(
+        "SELECT profile, lumabot_enabled FROM chat_runtime_modes WHERE chat_id = ?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return "off"
+    profile = str(row["profile"] or "").lower()
+    if profile in {"off", "agent", "remote"}:
+        return profile
+    return "agent" if row["lumabot_enabled"] else "off"
 
 
 def list_known_workspaces(limit: int = 10) -> list[str]:

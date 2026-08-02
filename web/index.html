@@ -44,6 +44,14 @@
             <button id="sidebar-toggle" class="sidebar-toggle">&#9776;</button>
             <span id="topbar-title" class="topbar-title">New Chat</span>
             <div class="topbar-right">
+                <select id="lumabot-mode-select" class="lumabot-mode-select"
+                        title="Choose LumaBot control mode" aria-label="LumaBot control mode">
+                    <option value="off">LumaBot Off</option>
+                    <option value="agent">LumaBot Agent</option>
+                    <option value="remote">LumaBot Remote</option>
+                </select>
+                <button id="lumabot-estop-btn" class="lumabot-estop-btn" type="button"
+                        title="Emergency stop LumaBot" aria-label="Emergency stop LumaBot">STOP</button>
                 <form id="workspace-form" class="workspace-form" title="Working directory for this chat">
                     <svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
                     <input id="workspace-input" class="workspace-input" type="text" spellcheck="false" placeholder="Working directory">
@@ -75,6 +83,35 @@
                 <div id="messages-inner" class="messages-inner"></div>
             </div>
             <div class="composer-wrapper">
+                <div id="lumabot-remote-controls" class="lumabot-remote-controls hidden">
+                    <div class="remote-control-grid">
+                        <button type="button" data-action="drive" data-direction="forward">▲</button>
+                        <button type="button" data-action="turn" data-direction="left">↶</button>
+                        <button type="button" class="remote-stop" data-action="stop">STOP</button>
+                        <button type="button" data-action="turn" data-direction="right">↷</button>
+                        <button type="button" data-action="drive" data-direction="backward">▼</button>
+                    </div>
+                    <div class="remote-control-options">
+                        <label>Turn seconds
+                            <select id="lumabot-duration">
+                                <option value="0.5">0.5</option>
+                                <option value="1" selected>1</option>
+                                <option value="2">2</option>
+                                <option value="5">5</option>
+                            </select>
+                        </label>
+                        <label>Speed
+                            <select id="lumabot-speed">
+                                <option value="0.2">20%</option>
+                                <option value="0.3" selected>30%</option>
+                                <option value="0.5">50%</option>
+                            </select>
+                        </label>
+                        <button type="button" data-action="turn_around">Turn 180°</button>
+                        <button type="button" data-action="park">Park</button>
+                        <button type="button" data-action="status">Status</button>
+                    </div>
+                </div>
                 <div id="composer" class="composer">
                     <input id="photo-input" class="photo-input" type="file" accept="image/*">
                     <button id="photo-btn" class="composer-btn photo-btn" type="button" title="Attach photo" aria-label="Attach photo">+</button>

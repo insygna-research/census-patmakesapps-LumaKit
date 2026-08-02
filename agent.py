@@ -23,6 +23,7 @@ from tool_registry import ToolRegistry
 from core.summarizer import apply_summary, build_summary_request, needs_summarization
 from core.storage import StorageManager
 from tools.code_intel.code_index import LazyCodeIndex, update_index_after_tool
+from tools.lumabot.activity import LumaBotActivityLease
 
 
 # Tools that modify files — require diff preview + confirmation
@@ -37,6 +38,9 @@ CONFIRM_TOOLS = {
     "git_add",
     "git_commit",
     "git_push",
+    "lumabot_reboot",
+    "lumabot_poweroff",
+    "lumabot_start_autonomy",
 }
 
 # Tools that have a built-in preview/confirm flow — always preview first
@@ -132,6 +136,8 @@ class Agent:
         self._tools_schema_cache = {}
         self._system_prompt_cache = {}
         self._system_message_cache = {}
+        self.runtime_profile = None
+        self._active_tool_groups = None
 
         # Initialize the LLM provider client (Ollama/Anthropic/OpenAI/xAI).
         # Kept on `self.ollama` for backwards compatibility — every client
@@ -516,15 +522,71 @@ class Agent:
             })
         )
 
+    def set_runtime_profile(self, profile=None):
+        """Select a focused prompt/tool profile for the next turn."""
+        if profile not in {None, "lumabot", "lumabot_remote"}:
+            raise ValueError(f"Unknown runtime profile: {profile}")
+        if self.runtime_profile == profile:
+            return
+        self.runtime_profile = profile
+        if profile == "lumabot":
+            self._active_tool_groups = ("lumabot",)
+        elif profile == "lumabot_remote":
+            self._active_tool_groups = ("__remote_direct_only__",)
+        else:
+            self._active_tool_groups = None
+        self._system_prompt_cache.clear()
+        self._system_message_cache.clear()
+
+    def _lumabot_system_prompt(self):
+        tool_names = ", ".join(
+            sorted(tool["name"] for tool in self.registry.list(groups={"lumabot"}))
+        )
+        return (
+            "You are Lumi operating the owner's physical LumaBot.\n"
+            f"Your tools: {tool_names}\n"
+            "ONLY use the listed LumaBot tools. Never invent tool names.\n\n"
+            "Interpret the user's natural-language intent yourself and call the appropriate "
+            "structured tool; there is no phrase parser. Use lumabot_drive once for one "
+            "continuous movement, lumabot_sequence once for an ordered multi-step request, "
+            "lumabot_start_autonomy only for an explicit roaming request, lumabot_stop to stop "
+            "manual or autonomous movement, and lumabot_status for hardware or battery questions. "
+            "Use lumabot_reboot or lumabot_poweroff only for the owner's explicit whole-robot "
+            "power request; those actions require confirmation. "
+            "Never repeat movement after a result says entire_request_scheduled=true. "
+            "Treat returned safety and readiness fields as authoritative and never claim "
+            "obstacle protection is active when it is not. Autonomous patrol is unavailable "
+            "until a patrol tool is exposed and the distance sensor is ready; never imitate "
+            "patrol with an indefinite drive command. After every tool result, give a "
+            "brief natural response. Successful movement replies should be one playful "
+            "sentence under 12 words unless the user asks for details."
+        )
+
+    @staticmethod
+    def _lumabot_remote_system_prompt():
+        return (
+            "LumaBot Remote mode is active. Direct structured controls are handled "
+            "outside the language model. No tools are available in this profile. "
+            "Tell the user to use the visible controls or /lumabot help."
+        )
+
     def build_system_prompt(self, extra_instructions=None, context_instructions=None):
         extra = (extra_instructions or "").strip()
         context = (context_instructions or "").strip()
-        cache_key = (extra, context)
+        cache_key = (self.runtime_profile, extra, context)
         cached = self._system_prompt_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        prompt = self._system_prompt_prefix
+        prompt = (
+            self._lumabot_system_prompt()
+            if self.runtime_profile == "lumabot"
+            else (
+                self._lumabot_remote_system_prompt()
+                if self.runtime_profile == "lumabot_remote"
+                else self._system_prompt_prefix
+            )
+        )
         if extra:
             prompt += (
                 "\n\nPersonality override for this Telegram user:\n"
@@ -545,7 +607,7 @@ class Agent:
     def build_system_message(self, extra_instructions=None, context_instructions=None):
         extra = (extra_instructions or "").strip()
         context = (context_instructions or "").strip()
-        cache_key = (extra, context)
+        cache_key = (self.runtime_profile, extra, context)
         cached = self._system_message_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
@@ -606,20 +668,29 @@ class Agent:
         return self.registry.list()
 
     def execute_tool(self, tool_name, inputs):
+        if self._active_tool_groups:
+            tool = self.registry.get(tool_name)
+            if not tool or tool.get("group") not in self._active_tool_groups:
+                return {
+                    "success": False,
+                    "error": f"{tool_name} is unavailable in {self.runtime_profile} mode",
+                    "toolName": tool_name,
+                }
         return self.registry.execute(tool_name, inputs)
 
     def get_code_index_status(self):
         return self.code_index.status()
 
     def get_tools_for_llm(self, groups=None):
-        group_key = tuple(sorted(groups or []))
+        effective_groups = self._active_tool_groups if groups is None else groups
+        group_key = tuple(sorted(effective_groups or []))
         cache_key = (self.registry.version, group_key)
         cached = self._tools_schema_cache.get(cache_key)
         if cached is not None:
             return self._filter_role_denied_tools(cached)
 
         result = []
-        group_filter = set(groups or [])
+        group_filter = set(effective_groups or [])
         for tool_name in self.registry.tools.keys():
             tool = self.registry.get(tool_name)
             if not tool.get("llm_exposed", True):
@@ -867,6 +938,8 @@ class Agent:
                 prompt or ("Image analysis" if has_image else ""),
                 kind="vision" if has_image else "chat",
             )
+            activity_lease = LumaBotActivityLease()
+            activity_lease.start()
             watchdog = StallWatchdog(
                 self.run_controller,
                 notify=lambda text: self.display.status(text),
@@ -1179,6 +1252,8 @@ class Agent:
                 watchdog.stop()
                 self.run_controller.finish_run("failed", error=str(exc))
                 raise
+            finally:
+                activity_lease.close()
 
     SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
