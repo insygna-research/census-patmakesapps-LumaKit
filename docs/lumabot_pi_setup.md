@@ -205,6 +205,22 @@ LUMIKIT_TTS_VOICE="en-US-AvaNeural"
 LUMIKIT_TTS_FORMAT="mp3"
 ```
 
+## Let the robot inspect its own code
+
+To give the agent read/write access to both repos (self-inspection and
+self-repair) while keeping the always-confirm prompts on shell, git, and
+deletes, add to `/home/lumabot21/.lumakit/config.env`:
+
+```dotenv
+LUMAKIT_ALLOW_PATHS="/home/lumabot21/lumabot:/home/lumabot21/lumakit"
+```
+
+Then `sudo systemctl restart lumakit`. This is deliberately narrower than
+`/safemode off` (which grants the whole filesystem and disables the forced
+approval prompts). Secrets files (`.env`, `config.env`, tokens, everything
+under `~/.lumakit/`) stay blocked by name in both modes, and non-owner
+Telegram users keep the workspace sandbox regardless.
+
 After LumaKit is running, the owner can enable replies and choose the voice
 from Telegram:
 
