@@ -20,8 +20,9 @@ Builders Edition** robot ([lumalien.com](https://lumalien.com)): the same
 agent that fixes your repo can roll through your home, look through a real
 camera and describe what it actually sees, and remember the rooms, objects,
 and routines it finds — while every safety-critical reflex runs on the robot
-itself, never on the model. One agent, from your terminal to your living
-room floor.
+itself, never on the model. The robot's onboard stack is open source too:
+[LumaBot](https://github.com/patmakesapps/LumaBot). One agent, from your
+terminal to your living room floor.
 
 ## Why this matters
 
@@ -92,31 +93,13 @@ cp .env.example .env
 lumakit open
 ```
 
-## Connect Struqt
-
-LumaKit can connect to [Struqt](https://www.struqt.live), the desktop project TODO manager, through Struqt's local API. Struqt must be open on the same machine.
-
-1. Open Struqt.
-2. Click **LumaKit** in Struqt's title bar.
-3. Enable the local API.
-4. Open LumaKit with `lumakit open`.
-5. Ask LumaKit: `is Struqt connected?`
-
-After the connection is active, you can ask LumaKit to list Struqt projects, create projects, create tasks, or update tasks. For example:
-
-```text
-show my Struqt projects
-create a Struqt task called "Review launch checklist" in Launch
-```
-
-Note: Struqt is managed by Utility Tech LLC. The Struqt-side release that enables this integration has not shipped publicly yet, but support is planned.
-
 ## Give Lumi a body: LumaBot / VISITOR LX-1
 
 LumaKit can drive a physical robot — the **VISITOR LX-1 Builders Edition**
 (available at [lumalien.com](https://lumalien.com)), known as LumaBot
-throughout the code. The robot runs a separate hardware daemon that owns all
-safety-critical behavior (obstacle stops, watchdog timeouts, collision
+throughout the code. The robot runs a separate open-source hardware daemon —
+[patmakesapps/LumaBot](https://github.com/patmakesapps/LumaBot) — that owns
+all safety-critical behavior (obstacle stops, watchdog timeouts, collision
 recovery), so driving never depends on Wi-Fi or a model response.
 
 Three modes, switchable from the web UI top bar or `/lumabot` on Telegram:
@@ -136,6 +119,25 @@ the robot's storage. Capturing is owner-only, and robot motion, autonomy,
 power, and camera tools are all denied to non-owner Telegram users.
 
 Setup guide: [LumaBot on a Raspberry Pi](docs/lumabot_pi_setup.md).
+
+## Connect Struqt
+
+LumaKit can connect to [Struqt](https://www.struqt.live), the desktop project TODO manager, through Struqt's local API. Struqt must be open on the same machine.
+
+1. Open Struqt.
+2. Click **LumaKit** in Struqt's title bar.
+3. Enable the local API.
+4. Open LumaKit with `lumakit open`.
+5. Ask LumaKit: `is Struqt connected?`
+
+After the connection is active, you can ask LumaKit to list Struqt projects, create projects, create tasks, or update tasks. For example:
+
+```text
+show my Struqt projects
+create a Struqt task called "Review launch checklist" in Launch
+```
+
+Note: Struqt is managed by Utility Tech LLC. The Struqt-side release that enables this integration has not shipped publicly yet, but support is planned.
 
 ## Bring any model
 
@@ -402,6 +404,7 @@ The repo now has the pieces a real install actually needs:
 - [Gmail Setup](docs/gmail_setup.md)
 - [Family & Group Alerts](docs/family_alerts.md)
 - [LumaBot on a Raspberry Pi](docs/lumabot_pi_setup.md)
+- [LumaBot repository](https://github.com/patmakesapps/LumaBot) — the robot's onboard daemon
 - [LumaKit vs OpenClaw](docs/vs-openclaw.md)
 
 ## Connect to Lumalok
