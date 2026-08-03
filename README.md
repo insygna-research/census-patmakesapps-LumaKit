@@ -104,6 +104,32 @@ create a Struqt task called "Review launch checklist" in Launch
 
 Note: Struqt is managed by Utility Tech LLC. The Struqt-side release that enables this integration has not shipped publicly yet, but support is planned.
 
+## Give Lumi a body: LumaBot / VISITOR LX-1
+
+LumaKit can drive a physical robot — the **VISITOR LX-1 Builders Edition**
+(available at [lumalien.com](https://lumalien.com)), known as LumaBot
+throughout the code. The robot runs a separate hardware daemon that owns all
+safety-critical behavior (obstacle stops, watchdog timeouts, collision
+recovery), so driving never depends on Wi-Fi or a model response.
+
+Three modes, switchable from the web UI top bar or `/lumabot` on Telegram:
+
+- **Off** — the full LumaKit agent, no robot tools.
+- **Agent** — a focused robot profile: Lumi interprets natural language and
+  drives through structured, watchdog-leased motion tools. It can also use
+  the camera (`lumabot_capture_photo` takes a real photo and looks at it) and
+  the memory tools, so the robot can remember rooms, objects, and routines it
+  observes.
+- **Remote** — a no-LLM D-pad: direct structured commands with zero model
+  involvement, plus a red STOP that also aborts any in-flight agent turn.
+
+Camera photos live in a private per-user library that self-prunes to the
+newest 20 (configurable with `LUMABOT_PHOTO_KEEP`), so captures can never eat
+the robot's storage. Capturing is owner-only, and robot motion, autonomy,
+power, and camera tools are all denied to non-owner Telegram users.
+
+Setup guide: [LumaBot on a Raspberry Pi](docs/lumabot_pi_setup.md).
+
 ## Bring any model
 
 LumaKit speaks to four providers behind one interface — pick with `LLM_PROVIDER`:
@@ -259,6 +285,8 @@ The web UI can already:
 - pick the provider and model (per-provider memory, applied live — no restart)
 - detect when `.env` was edited after startup and restart the backend in one click
 - block first-run use until a model is selected when nothing is configured
+- switch LumaBot modes (Off / Agent / Remote), drive with the Remote D-pad, and
+  emergency-stop the robot
 
 ## Core features
 
@@ -271,6 +299,9 @@ The web UI can already:
 - **Telegram** with multi-user support, reminders, photos, voice, and owner controls
 - **Browser automation** with persistent auth profiles
 - **Memory and reminders** with personal vs. family scope
+- **Physical robot control** for the VISITOR LX-1 (LumaBot): watchdog-leased
+  motion, camera capture the model can actually look at, a self-pruning photo
+  library, and a no-LLM remote mode with a hard STOP
 - **Autonomous Gmail loop** with owner approval, URL stripping, leak scan, and audit log
 - **Code intelligence** with tree-sitter-backed symbol search and call graph tooling
 - **Surface-aware delivery** for screenshots, images, reminders, and follow-up messages
@@ -288,9 +319,12 @@ LumaKit gives a model real tools — including a shell — so its security postu
 - **Filesystem sandbox.** File tools are contained to the active workspace. Secrets paths
   (`.env`, `config.env`, `~/.lumakit/**`, `.git/config`) are never readable by tools, even
   inside the workspace. Power users can widen access with `LUMAKIT_ALLOW_PATHS`.
-- **Approvals that can't be toggled away.** Shell, Python execution, file deletion, and git
-  writes always prompt for approval — even if you turn the general approvals setting off. The
-  confirm flow fails closed: a missing or timed-out confirmation is a denial.
+- **Approvals with a floor.** While safe mode is on (the default), shell, Python execution,
+  file deletion, and git writes always prompt for approval — even if you turn the general
+  approvals setting off — and the confirm flow fails closed: a missing or timed-out
+  confirmation is a denial. The owner can explicitly drop this floor with `/safemode off`
+  (owner-only, Telegram or Settings), which also opens the filesystem sandbox for the owner;
+  secrets files stay blocked and other users keep their limits regardless.
 - **Autonomous tasks have the same floor.** A background task that reaches a protected action
   pauses and asks you (Telegram or web) instead of running it. Approval mints a one-shot grant
   for exactly that command, with a 60-minute expiry; denial resumes the task with
@@ -312,6 +346,7 @@ If you want the full always-available agent experience, these docs matter:
 - [Launcher Commands](docs/launcher.md)
 - [Autostart / systemd](docs/autostart.md)
 - [Family & Group Alerts](docs/family_alerts.md)
+- [LumaBot on a Raspberry Pi](docs/lumabot_pi_setup.md)
 
 ## Current model/runtime controls
 
@@ -359,6 +394,7 @@ The repo now has the pieces a real install actually needs:
 - [Telegram Setup](docs/telegram_setup.md)
 - [Gmail Setup](docs/gmail_setup.md)
 - [Family & Group Alerts](docs/family_alerts.md)
+- [LumaBot on a Raspberry Pi](docs/lumabot_pi_setup.md)
 - [LumaKit vs OpenClaw](docs/vs-openclaw.md)
 
 ## Connect to Lumalok
@@ -384,7 +420,8 @@ lumakit.service.example
 surfaces/             User interfaces: web, Telegram, and CLI
 core/                 Shared runtime services: providers, auth, tasks, storage, approvals
 core/providers/       Model provider adapters (Ollama, Anthropic, OpenAI, xAI)
-tools/                Tool registry modules grouped by repo, runtime, web, memory, and comms
+tools/                Tool registry modules grouped by repo, runtime, web, memory, comms,
+                      code_intel, lumabot (robot), lumalok, and struqt
 tests/                Pytest suite (security policy, sandbox, providers, durability)
 web/                  Browser UI assets
 docs/                 User-facing setup and feature guides

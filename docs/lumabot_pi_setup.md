@@ -1,7 +1,9 @@
 # LumaKit on LumaBot
 
 This is the reproducible factory and developer setup for the open-source
-LumaBot agent. It targets a Raspberry Pi 5 with 2 GB RAM and a hosted LLM.
+LumaBot agent — the software stack of the **VISITOR LX-1 Builders Edition**
+robot ([lumalien.com](https://lumalien.com)). It targets a Raspberry Pi 5
+with 2 GB RAM and a hosted LLM.
 
 Tested on:
 
@@ -51,12 +53,20 @@ movement. The present mapping is Motor 1 = left (software-inverted) and Motor 4
 = right.
 
 The LumaKit `lumabot_status`, `lumabot_drive`, `lumabot_sequence`,
-`lumabot_stop`, `lumabot_start_autonomy`, `lumabot_reboot`, and
-`lumabot_poweroff` tools control the
-robot. Movement and whole-Pi power tools are owner-only. Reboot and poweroff
+`lumabot_stop`, `lumabot_start_autonomy`, `lumabot_capture_photo`,
+`lumabot_list_photos`, `lumabot_view_photo`, `lumabot_trash_photo`,
+`lumabot_reboot`, and `lumabot_poweroff` tools control the robot. Movement,
+camera capture, and whole-Pi power tools are owner-only. Reboot and poweroff
 also always require interactive confirmation and are refused in autonomous
 tasks. Natural-language intent and the final acknowledgement remain part of
 LumaKit's normal LLM tool-result cycle; there is no phrase parser.
+
+Camera captures go through the daemon's `/camera/capture` endpoint, land in a
+private per-user library, and are attached to the conversation so the model
+can actually look at them. The library self-prunes to the newest 20 photos
+(override with `LUMABOT_PHOTO_KEEP` in `config.env`), trashed photos are
+purged after a week, and only the newest photo stays in model context, so
+captures cannot grow the Pi's storage or the token bill.
 
 Autonomous driving runs locally in the LumaBot daemon and continues without an
 LLM round trip. Starting it through LumaKit requires owner confirmation; the
@@ -91,9 +101,11 @@ Telegram/CLI: /lumabot off
 Web: choose Off, Agent, or Remote in the top bar
 ```
 
-Agent mode replaces the full agent prompt and 98-tool catalog with a compact
-robot prompt and only the four LumaBot tools. Natural-language and voice
-requests still use the configured hosted model.
+Agent mode replaces the full agent prompt and tool catalog with a compact
+robot prompt and only the LumaBot tool group (movement, status, autonomy,
+camera, power) plus the memory tools, so the robot can remember rooms,
+objects, and routines it observes and recall them later. Natural-language
+and voice requests still use the configured hosted model.
 
 Remote mode makes no LLM calls. The web UI shows a D-pad, Telegram shows
 inline buttons, and CLI/Telegram accept explicit commands such as:
@@ -120,8 +132,10 @@ can issue another movement. Free-form text, photos, and voice are deliberately
 not interpreted in Remote mode. “Park” cancels scheduled movement and coasts
 both motors. The 180-degree control scales the one-second full-speed bench
 calibration for the selected throttle, but remains approximate without wheel
-encoders. Autonomous patrol remains unavailable until the distance sensor is
-connected and verified.
+encoders. Autonomous driving is available whenever the daemon reports the
+distance sensor ready and fresh; the full behavior — including the
+sweep-and-commit corner-escape scan — is documented in the LumaBot
+repository's `docs/autonomy.md`.
 
 After updating either checkout:
 

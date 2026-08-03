@@ -39,8 +39,10 @@ Optional BotFather tweaks (all via the chat):
   stop - Interrupt Lumi mid-task
   status - Show model, storage, and index info
   tasks - List autonomous background tasks
+  task - Show details for a specific task
   voice - Toggle voice replies and pick a voice
   personality - View or change your personality override
+  lumabot - Robot modes and remote driving (owner)
   ```
 
 ## Step 2 — Get your Telegram chat ID
@@ -196,12 +198,18 @@ Re-run `/setcommands` on @BotFather and paste the list. It can take a minute to 
 | `/tasks` | all | List autonomous background tasks |
 | `/task <id>` | all | Show details for a specific task |
 | `/voice ...` | all | Enable/disable voice replies, list voices, pick a voice |
-| `/personality` | all | View or change your personality override |
+| `/personality` | all | View or change your personality override (alias `/prompt`) |
 | `/tools` | all | Toggle tool-call visibility in replies |
 | `/adduser` | owner | Approve pending user requests |
 | `/removeuser` | owner | Remove an authorized user |
 | `/users` | owner | List authorized users |
+| `/role` | owner | Assign `trusted` / `limited` roles to users |
 | `/model` | owner | Change the owner's primary, fallback, or local model |
+| `/approve N` / `/deny N` | owner | Approve or deny a paused task's protected action |
+| `/workspace <path>` | owner | Switch the active workspace (alias `/dir`) |
+| `/permissions on\|off` | owner | Toggle general tool approvals (protected actions still confirm while safe mode is on; alias `/approvals`) |
+| `/safemode on\|off` | owner | Safe mode: forced-approval floor + filesystem sandbox. `off` grants the owner full machine access; secrets stay blocked, other users keep their limits |
+| `/lumabot off\|agent\|remote\|status` | owner | Switch LumaBot robot modes; Remote mode adds inline driving buttons |
 
 ## Files involved
 

@@ -298,6 +298,9 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         return True
 
     if cmd in {"/permissions", "/approvals"}:
+        if str(chat_id) != str(OWNER_ID):
+            send_message("This command is owner-only.")
+            return True
         cfg = get_app_runtime_config().copy()
         current = bool(cfg.get("require_tool_approvals", True))
         value = args.strip().lower()
