@@ -31,6 +31,8 @@ _REMOTE_SLOTS = threading.Semaphore(_REMOTE_CONCURRENCY)
 
 
 class OpenAICompatClient(LLMClient):
+    supports_tools_with_images = True
+
     def __init__(
         self,
         base_url: str,

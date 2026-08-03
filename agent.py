@@ -80,6 +80,33 @@ def timestamp_message(message: dict) -> dict:
     return stamped
 
 
+MAX_ATTACHED_IMAGE_BYTES = 8_000_000
+
+
+def build_image_attachment_message(path_str, tool_name):
+    """A synthetic user message carrying a photo a tool asked to attach.
+
+    Returns None (attach nothing) unless the path is a readable, reasonably
+    sized image file. The message is marked ``tool_image`` so history
+    compaction can drop older photos instead of resending them every turn.
+    """
+    try:
+        path = Path(str(path_str))
+        if path.suffix.lower() not in Agent.SUPPORTED_IMAGE_EXTS:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data or len(data) > MAX_ATTACHED_IMAGE_BYTES:
+        return None
+    return {
+        "role": "user",
+        "content": f"[photo from {tool_name}: {path.name}]",
+        "images": [base64.b64encode(data).decode("utf-8")],
+        "tool_image": True,
+    }
+
+
 class Agent:
     MAX_TOOL_ROUNDS = 5
     ROUND_DEADLINE = 120        # seconds per LLM call
@@ -530,7 +557,7 @@ class Agent:
             return
         self.runtime_profile = profile
         if profile == "lumabot":
-            self._active_tool_groups = ("lumabot",)
+            self._active_tool_groups = ("lumabot", "memory")
         elif profile == "lumabot_remote":
             self._active_tool_groups = ("__remote_direct_only__",)
         else:
@@ -540,7 +567,10 @@ class Agent:
 
     def _lumabot_system_prompt(self):
         tool_names = ", ".join(
-            sorted(tool["name"] for tool in self.registry.list(groups={"lumabot"}))
+            sorted(
+                tool["name"]
+                for tool in self.registry.list(groups={"lumabot", "memory"})
+            )
         )
         return (
             "You are Lumi operating the owner's physical LumaBot.\n"
@@ -557,7 +587,13 @@ class Agent:
             "Treat returned safety and readiness fields as authoritative and never claim "
             "obstacle protection is active when it is not. Autonomous patrol is unavailable "
             "until a patrol tool is exposed and the distance sensor is ready; never imitate "
-            "patrol with an indefinite drive command. After every tool result, give a "
+            "patrol with an indefinite drive command. "
+            "Use lumabot_capture_photo when the user asks what you see or when looking at "
+            "the surroundings would genuinely help; the photo arrives as the next message — "
+            "describe only what is actually visible in it, never invented detail. "
+            "Use remember to store lasting observations and facts (rooms, places, objects, "
+            "routines the owner mentions) and recall to answer questions about what you "
+            "have seen or learned before. After every tool result, give a "
             "brief natural response. Successful movement replies should be one playful "
             "sentence under 12 words unless the user asks for details."
         )
@@ -914,6 +950,20 @@ class Agent:
             compacted = compact_tool_message_content(message.get("name"), content)
             if compacted != content:
                 message["content"] = compacted
+        # Keep only the newest tool-attached photo in context — older ones
+        # would otherwise ride along (and cost tokens) on every later turn.
+        attachment_indexes = [
+            i
+            for i, message in enumerate(self.messages)
+            if message.get("tool_image") and message.get("images")
+        ]
+        for i in attachment_indexes[:-1]:
+            message = self.messages[i]
+            message.pop("images", None)
+            message["content"] = (
+                "[an older camera photo was dropped from context — use "
+                "lumabot_view_photo to look at it again if needed]"
+            )
 
     def _interrupt_response(self):
         """Produce the stop response and reset the flag."""
@@ -991,9 +1041,16 @@ class Agent:
                 self.interrupt_requested = False
                 self.last_model_used = None
 
-                # Image turns keep the historical no-tools behavior — several
-                # local vision models misbehave when tools are attached.
-                tools = None if image_data else self.get_tools_for_llm()
+                # Local vision models misbehave when tools are attached to an
+                # image turn, so the native Ollama path keeps the historical
+                # no-tools behavior. Cloud providers handle tools+images fine
+                # and keep their tools, making image turns fully agentic.
+                if image_data and not getattr(
+                    self.ollama, "supports_tools_with_images", False
+                ):
+                    tools = None
+                else:
+                    tools = self.get_tools_for_llm()
                 start_time = time.monotonic()
                 self._reset_attempt_ledger()
 
@@ -1233,6 +1290,36 @@ class Agent:
                                 "content": compact_tool_result_for_history(tool_name, tool_result),
                             })
                         )
+
+                        # A tool may ask for an image to be shown to the model
+                        # (e.g. a LumaBot camera capture): attach it as the
+                        # next message so the following round can look at it.
+                        payload = (
+                            tool_result.get("data")
+                            if isinstance(tool_result, dict)
+                            else None
+                        )
+                        attach_path = (
+                            payload.get("attach_image_path")
+                            if isinstance(payload, dict) and tool_result.get("success")
+                            else None
+                        )
+                        if attach_path:
+                            if getattr(self.ollama, "supports_tools_with_images", False):
+                                attachment = build_image_attachment_message(
+                                    attach_path, tool_name
+                                )
+                            else:
+                                attachment = {
+                                    "role": "user",
+                                    "content": (
+                                        "[a photo was saved, but the current provider "
+                                        "cannot view images during tool use — tell the "
+                                        "user where the photo is saved instead]"
+                                    ),
+                                }
+                            if attachment:
+                                self.messages.append(timestamp_message(attachment))
 
                     # React-only round with existing text: finalize without
                     # another model call. Replace the placeholder content on

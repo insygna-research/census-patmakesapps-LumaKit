@@ -55,6 +55,11 @@ def start_autonomy() -> dict:
     return _request("POST", "/autonomy", {"active": True})
 
 
+def capture_photo() -> dict:
+    # The daemon shells out to rpicam-still, which can take several seconds.
+    return _request("POST", "/camera/capture", timeout=15.0)
+
+
 def set_indicator_activity(lease_id: str, active: bool, ttl_s: float) -> dict:
     return _request(
         "POST",

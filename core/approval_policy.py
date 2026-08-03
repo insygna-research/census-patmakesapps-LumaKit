@@ -152,6 +152,8 @@ OWNER_ONLY_TOOLS = frozenset({
     "lumabot_sequence",
     "lumabot_stop",
     "lumabot_start_autonomy",
+    # the camera photographs the owner's home
+    "lumabot_capture_photo",
     # tasks run autonomously with broader powers — creating/deleting them is
     # an escalation path for non-owners
     "create_task",

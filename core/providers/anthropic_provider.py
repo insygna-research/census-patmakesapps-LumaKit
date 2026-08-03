@@ -30,6 +30,8 @@ MAX_OUTPUT_TOKENS = 16000
 
 
 class AnthropicClient(LLMClient):
+    supports_tools_with_images = True
+
     def __init__(
         self,
         *,

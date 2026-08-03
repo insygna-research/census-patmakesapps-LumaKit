@@ -25,6 +25,15 @@ def _minimal_agent():
         },
         group="repo",
     )
+    agent.registry.register(
+        {
+            "name": "remember",
+            "description": "Store a memory.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "execute": lambda inputs: {"stored": True},
+        },
+        group="memory",
+    )
     agent.runtime_profile = None
     agent._active_tool_groups = None
     agent._system_prompt_prefix = "FULL LUMAKIT PROMPT"
@@ -52,12 +61,12 @@ def test_mode_persists_per_conversation(tmp_path, monkeypatch):
     assert chat_store.get_chat_lumabot_profile("chat-a") == "off"
 
 
-def test_mode_exposes_only_lumabot_tools_with_compact_prompt():
+def test_mode_exposes_lumabot_and_memory_tools_with_compact_prompt():
     agent = _minimal_agent()
     agent.set_runtime_profile("lumabot")
 
     names = [tool["function"]["name"] for tool in agent.get_tools_for_llm()]
-    assert names == ["lumabot_drive"]
+    assert names == ["lumabot_drive", "remember"]
     prompt = agent.build_system_prompt()
     assert "physical LumaBot" in prompt
     assert "natural-language intent yourself" in prompt
@@ -73,13 +82,21 @@ def test_mode_blocks_hidden_tool_execution():
     assert "unavailable in lumabot mode" in result["error"]
 
 
+def test_memory_tools_execute_in_lumabot_mode():
+    agent = _minimal_agent()
+    agent.set_runtime_profile("lumabot")
+
+    result = agent.execute_tool("remember", {})
+    assert result["success"] is True
+
+
 def test_turning_mode_off_restores_full_tool_catalog():
     agent = _minimal_agent()
     agent.set_runtime_profile("lumabot")
     agent.set_runtime_profile(None)
 
     names = {tool["function"]["name"] for tool in agent.get_tools_for_llm()}
-    assert names == {"lumabot_drive", "read_file"}
+    assert names == {"lumabot_drive", "read_file", "remember"}
     assert agent.build_system_prompt() == "FULL LUMAKIT PROMPT"
 
 

@@ -41,7 +41,7 @@ __all__ = [
 
 # Keys LumaKit adds to messages for its own bookkeeping — not part of any
 # provider wire format.
-_INTERNAL_MESSAGE_KEYS = {"created_at"}
+_INTERNAL_MESSAGE_KEYS = {"created_at", "tool_image"}
 
 
 class LLMClient(ABC):
@@ -50,6 +50,10 @@ class LLMClient(ABC):
     name: str = "unknown"
     supports_tools: bool = True
     supports_vision: bool = True
+    # Whether the provider reliably handles tool definitions and images in the
+    # same request. Cloud providers do; several local vision models misbehave,
+    # so the native Ollama path keeps the historical no-tools image turns.
+    supports_tools_with_images: bool = False
 
     def __init__(self, *, fallback_model: str | None = None, request_timeout: int = 120):
         self.fallback_model = fallback_model
