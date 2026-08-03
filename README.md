@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/patmakesapps/LumaKit/actions/workflows/ci.yml/badge.svg)](https://github.com/patmakesapps/LumaKit/actions/workflows/ci.yml)
 
-**The self-hosted autonomous task agent you can actually trust with a shell.** Delegate a job from your desk, watch it work in a real UI, approve the risky steps, and get pinged when it's done. Runs on Claude, GPT, Grok — or fully local Ollama when privacy matters.
+**The self-hosted autonomous task agent you can actually trust with a shell — and now with a body.** Delegate a job from your desk, watch it work in a real UI, approve the risky steps, and get pinged when it's done. Runs on Claude, GPT, Grok — or fully local Ollama when privacy matters.
 
 <!-- LAUNCH GIF (pre-launch checklist §8.2): record per docs/demo-script.md, export ≤10 MB,
      save as photos/lumakit_flagship_demo.gif, then uncomment:
@@ -13,9 +13,15 @@
 </p>
 -->
 
-Coming from OpenClaw? See the honest comparison: [LumaKit vs OpenClaw](docs/vs-openclaw.md).
-
 LumaKit gives a model real tools: shell execution, repository work, web search, browser automation, screenshots, email, reminders, memory, and long-running autonomous tasks that survive restarts. Not another chat assistant — a task agent: you hand Lumi a job, it runs it start to finish, and it reports back.
+
+And LumaKit doesn't stop at the desk. It is the mind of the **VISITOR LX-1
+Builders Edition** robot ([lumalien.com](https://lumalien.com)): the same
+agent that fixes your repo can roll through your home, look through a real
+camera and describe what it actually sees, and remember the rooms, objects,
+and routines it finds — while every safety-critical reflex runs on the robot
+itself, never on the model. One agent, from your terminal to your living
+room floor.
 
 ## Why this matters
 
@@ -23,6 +29,7 @@ LumaKit gives a model real tools: shell execution, repository work, web search, 
 - **Real observability.** A web UI that shows live tool activity, diff previews before writes, approval prompts, and screenshots — you *watch it work*, not just chat with it.
 - **Safe autonomy.** Token-gated server, filesystem sandbox, fail-closed confirmations, and approvals on shell/git/delete that can't be toggled away — a background task that hits a risky step pauses and asks your phone. See [Security model](#security-model).
 - **Bring any model.** One config switch between Anthropic (Claude), OpenAI (GPT), xAI (Grok), and local Ollama — local stays the privacy option, not a requirement.
+- **A body, not just a shell.** Pair LumaKit with the VISITOR LX-1 and the agent gains wheels, a camera it can genuinely see through, and a memory of your home — with a no-LLM remote mode and a hard STOP always one tap away.
 - **Real launcher flow.** `lumakit open` starts or reuses the backend and opens the UI; Linux gets an app-menu launcher, Windows gets Desktop/Start Menu shortcuts.
 
 ## What it looks like
