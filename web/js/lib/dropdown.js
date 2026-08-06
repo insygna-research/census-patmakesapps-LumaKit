@@ -38,6 +38,8 @@ function bindGlobals() {
  * @param {string} [config.menuClass]       extra classes for the menu
  * @param {string} [config.ariaLabel]
  * @param {string} [config.title]
+ * @param {boolean} [config.autoApply=true]  apply the choice immediately; pass
+ *        false when an owner (e.g. a server echo) decides the real value
  * @param {(value: string) => void} [config.onSelect]  fired on user choice only
  * @returns {{trigger: HTMLElement, menu: HTMLElement, getValue: () => string,
  *            setValue: (v: string) => void, setDisabled: (b: boolean) => void,
@@ -51,6 +53,7 @@ export function createDropdown({
     menuClass = '',
     ariaLabel = '',
     title = '',
+    autoApply = true,
     onSelect,
 }) {
     if (!mount) throw new Error('createDropdown: mount element is required');
@@ -207,6 +210,7 @@ export function createDropdown({
         const opt = items[index];
         if (!opt || opt.disabled) return;
         close({ refocus: true });
+        if (autoApply) api.setValue(opt.value);
         onSelect?.(opt.value, opt);
     }
 

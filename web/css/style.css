@@ -482,6 +482,18 @@ body {
     min-width: 190px;
 }
 
+.remote-control-menu {
+    min-width: 84px;
+}
+
+.remote-control-menu .custom-dropdown-option.selected {
+    color: #fde68a;
+}
+
+.remote-control-menu .custom-dropdown-option.selected.active {
+    background: rgba(245, 158, 11, 0.16);
+}
+
 .lumabot-mode-select:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -570,12 +582,22 @@ body {
     font-size: 11px;
 }
 
-.remote-control-options select {
+.remote-control-options .remote-control-select {
     height: 32px;
+    min-height: 32px;
+    padding: 0 9px;
     border: 1px solid rgba(251, 191, 36, 0.3);
     border-radius: 8px;
     background: rgba(20, 16, 12, 0.8);
     color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.remote-control-options .remote-control-select:hover:not(:disabled),
+.remote-control-options .remote-control-select.open {
+    border-color: rgba(251, 191, 36, 0.7);
+    color: #fde68a;
 }
 
 .remote-control-options button {

@@ -26,8 +26,8 @@ const $statusDot = document.getElementById('status-dot');
 const $lumabotModeMount = document.getElementById('lumabot-mode-dropdown');
 const $lumabotEstopBtn = document.getElementById('lumabot-estop-btn');
 const $lumabotRemoteControls = document.getElementById('lumabot-remote-controls');
-const $lumabotDuration = document.getElementById('lumabot-duration');
-const $lumabotSpeed = document.getElementById('lumabot-speed');
+const $lumabotDurationMount = document.getElementById('lumabot-duration');
+const $lumabotSpeedMount = document.getElementById('lumabot-speed');
 const $suggestionCards = document.getElementById('suggestion-cards');
 const $workspaceForm = document.getElementById('workspace-form');
 const $workspaceInput = document.getElementById('workspace-input');
@@ -268,6 +268,7 @@ const lumabotModeDropdown = $lumabotModeMount
         ariaLabel: 'LumaBot control mode',
         title: 'Choose LumaBot control mode',
         value: 'off',
+        autoApply: false,
         options: [
             { value: 'off', label: 'LumaBot Off', hint: 'Chat only' },
             { value: 'agent', label: 'LumaBot Agent', hint: 'Lumi drives' },
@@ -277,6 +278,37 @@ const lumabotModeDropdown = $lumabotModeMount
             if (isWorking) return;
             ws.send({ type: 'lumabot_mode', mode });
         },
+    })
+    : null;
+
+const lumabotDurationDropdown = $lumabotDurationMount
+    ? createDropdown({
+        mount: $lumabotDurationMount,
+        triggerClass: 'remote-control-select',
+        menuClass: 'remote-control-menu',
+        ariaLabel: 'Turn seconds',
+        value: '1',
+        options: [
+            { value: '0.5', label: '0.5' },
+            { value: '1', label: '1' },
+            { value: '2', label: '2' },
+            { value: '5', label: '5' },
+        ],
+    })
+    : null;
+
+const lumabotSpeedDropdown = $lumabotSpeedMount
+    ? createDropdown({
+        mount: $lumabotSpeedMount,
+        triggerClass: 'remote-control-select',
+        menuClass: 'remote-control-menu',
+        ariaLabel: 'Speed',
+        value: '0.3',
+        options: [
+            { value: '0.2', label: '20%' },
+            { value: '0.3', label: '30%' },
+            { value: '0.5', label: '50%' },
+        ],
     })
     : null;
 
@@ -2688,8 +2720,8 @@ $lumabotRemoteControls?.querySelectorAll('button[data-action]').forEach(button =
             type: 'lumabot_control',
             action: button.dataset.action,
             direction: button.dataset.direction || null,
-            duration_s: Number($lumabotDuration?.value || 1),
-            speed: Number($lumabotSpeed?.value || 0.3),
+            duration_s: Number(lumabotDurationDropdown?.getValue() || 1),
+            speed: Number(lumabotSpeedDropdown?.getValue() || 0.3),
             continuous: button.dataset.action === 'drive',
         });
     });
