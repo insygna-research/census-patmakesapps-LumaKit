@@ -1797,6 +1797,10 @@ if ($newTaskForm) {
 }
 
 // --- Settings ---
+// The settings pane is re-rendered wholesale, so the previous dropdown's
+// body-level menu has to be torn down with it.
+let providerDropdown = null;
+
 async function loadSettings() {
     try {
         const res = await fetch('/api/settings');
@@ -1836,9 +1840,14 @@ async function loadSettings() {
 
         const provider = settings.llm_provider || 'ollama';
         const providerKeySet = settings.api_keys_set || {};
+        const providerLabels = {
+            ollama: 'Ollama (local)',
+            anthropic: 'Anthropic (Claude)',
+            openai: 'OpenAI (GPT)',
+            xai: 'xAI (Grok)',
+        };
         const providerOptions = ['ollama', 'anthropic', 'openai', 'xai']
-            .map(p => `<option value="${p}" ${p === provider ? 'selected' : ''}>${{ollama: 'Ollama (local)', anthropic: 'Anthropic (Claude)', openai: 'OpenAI (GPT)', xai: 'xAI (Grok)'}[p]}</option>`)
-            .join('');
+            .map(p => ({ value: p, label: providerLabels[p] }));
         const keyPlaceholder = (p) => providerKeySet[p]
             ? 'Key found in your environment — leave blank to use it'
             : 'Paste your API key';
@@ -1848,6 +1857,9 @@ async function loadSettings() {
         const modelPlaceholder = (p) => providerDefaults[p]
             ? `Default: ${providerDefaults[p]} — leave blank to use it`
             : 'e.g. qwen3 — pull a model with Ollama or set OLLAMA_MODEL in .env';
+
+        providerDropdown?.destroy();
+        providerDropdown = null;
 
         $settingsContent.innerHTML = `
             ${banner}
@@ -1862,8 +1874,8 @@ async function loadSettings() {
                 </div>
                 <form id="provider-form" class="settings-form">
                     <div class="settings-field">
-                        <label for="provider-select">Provider</label>
-                        <select id="provider-select" class="settings-select">${providerOptions}</select>
+                        <label>Provider</label>
+                        <div id="provider-select" class="custom-dropdown settings-dropdown"></div>
                     </div>
                     <div class="settings-field">
                         <label for="provider-model-input">Model</label>
@@ -1968,7 +1980,7 @@ async function loadSettings() {
 
         const $toolApprovalInputs = $settingsContent.querySelectorAll('input[name="tool-approvals"]');
         const $providerForm = document.getElementById('provider-form');
-        const $providerSelect = document.getElementById('provider-select');
+        const $providerMount = document.getElementById('provider-select');
         const $providerModelInput = document.getElementById('provider-model-input');
         const $providerFallbackInput = document.getElementById('provider-fallback-input');
         const $apiKeyField = document.getElementById('api-key-field');
@@ -1980,10 +1992,9 @@ async function loadSettings() {
         const draftFallbacks = { ...providerFallbacks };
         let selectedProvider = provider;
 
-        $providerSelect?.addEventListener('change', () => {
+        function applyProvider(p) {
             if ($providerModelInput) draftModels[selectedProvider] = $providerModelInput.value;
             if ($providerFallbackInput) draftFallbacks[selectedProvider] = $providerFallbackInput.value;
-            const p = $providerSelect.value;
             selectedProvider = p;
             if ($providerModelInput) {
                 $providerModelInput.value = draftModels[p] || '';
@@ -2007,11 +2018,23 @@ async function loadSettings() {
             if ($keyStatus) {
                 $keyStatus.style.display = providerKeySet[p] ? '' : 'none';
             }
-        });
+        }
+
+        providerDropdown = $providerMount
+            ? createDropdown({
+                mount: $providerMount,
+                triggerClass: 'settings-select',
+                menuClass: 'settings-dropdown-menu',
+                ariaLabel: 'Model provider',
+                value: provider,
+                options: providerOptions,
+                onSelect: applyProvider,
+            })
+            : null;
 
         $providerForm?.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const p = $providerSelect?.value || 'ollama';
+            const p = providerDropdown?.getValue() || 'ollama';
             const modelChoice = ($providerModelInput?.value || '').trim();
             const payload = {
                 llm_provider: p,
