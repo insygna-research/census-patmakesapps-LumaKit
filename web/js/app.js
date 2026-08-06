@@ -5,6 +5,7 @@
 
 import { wsUrl } from './lib/auth.js';
 import { WS } from './lib/ws.js';
+import { createDropdown } from './lib/dropdown.js';
 
 // --- DOM refs ---
 const $messages = document.getElementById('messages');
@@ -22,7 +23,7 @@ const $modelBadge = document.getElementById('model-badge');
 const $modelBadgeText = $modelBadge?.querySelector('.model-badge-text') || $modelBadge;
 const $statusLabel = document.getElementById('status-label');
 const $statusDot = document.getElementById('status-dot');
-const $lumabotModeSelect = document.getElementById('lumabot-mode-select');
+const $lumabotModeMount = document.getElementById('lumabot-mode-dropdown');
 const $lumabotEstopBtn = document.getElementById('lumabot-estop-btn');
 const $lumabotRemoteControls = document.getElementById('lumabot-remote-controls');
 const $lumabotDuration = document.getElementById('lumabot-duration');
@@ -236,7 +237,7 @@ function setWorking(working) {
     if ($workspaceInput) $workspaceInput.disabled = working;
     if ($workspaceBrowse) $workspaceBrowse.disabled = working;
     if ($photoBtn) $photoBtn.disabled = working;
-    if ($lumabotModeSelect) $lumabotModeSelect.disabled = working;
+    lumabotModeDropdown?.setDisabled(working);
     // Type /stop to interrupt — no UI toggle needed
 }
 
@@ -257,13 +258,35 @@ function setWorkspace(path, displayPath) {
     }
 }
 
+// The selected mode is never applied locally — the server echoes the accepted
+// mode back over the socket, and setLumabotMode() applies it.
+const lumabotModeDropdown = $lumabotModeMount
+    ? createDropdown({
+        mount: $lumabotModeMount,
+        triggerClass: 'lumabot-mode-select',
+        menuClass: 'lumabot-mode-menu',
+        ariaLabel: 'LumaBot control mode',
+        title: 'Choose LumaBot control mode',
+        value: 'off',
+        options: [
+            { value: 'off', label: 'LumaBot Off', hint: 'Chat only' },
+            { value: 'agent', label: 'LumaBot Agent', hint: 'Lumi drives' },
+            { value: 'remote', label: 'LumaBot Remote', hint: 'You drive' },
+        ],
+        onSelect: (mode) => {
+            if (isWorking) return;
+            ws.send({ type: 'lumabot_mode', mode });
+        },
+    })
+    : null;
+
 function setLumabotMode(mode) {
     if (typeof mode === 'boolean') mode = mode ? 'agent' : 'off';
     lumabotMode = ['off', 'agent', 'remote'].includes(mode) ? mode : 'off';
-    if ($lumabotModeSelect) {
-        $lumabotModeSelect.value = lumabotMode;
-        $lumabotModeSelect.classList.toggle('agent', lumabotMode === 'agent');
-        $lumabotModeSelect.classList.toggle('remote', lumabotMode === 'remote');
+    if (lumabotModeDropdown) {
+        lumabotModeDropdown.setValue(lumabotMode);
+        lumabotModeDropdown.trigger.classList.toggle('agent', lumabotMode === 'agent');
+        lumabotModeDropdown.trigger.classList.toggle('remote', lumabotMode === 'remote');
     }
     const remote = lumabotMode === 'remote';
     $lumabotRemoteControls?.classList.toggle('hidden', !remote);
@@ -2654,13 +2677,6 @@ function sendMessage() {
 }
 
 $sendBtn.onclick = sendMessage;
-
-$lumabotModeSelect?.addEventListener('change', () => {
-    if (isWorking) return;
-    const requestedMode = $lumabotModeSelect.value;
-    $lumabotModeSelect.value = lumabotMode;
-    ws.send({ type: 'lumabot_mode', mode: requestedMode });
-});
 
 $lumabotEstopBtn?.addEventListener('click', () => {
     ws.send({ type: 'lumabot_control', action: 'stop' });
