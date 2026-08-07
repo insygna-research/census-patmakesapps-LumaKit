@@ -14,6 +14,7 @@ import threading
 from core.providers.base import (
     LLMClient,
     ProviderConnectionError,
+    ProviderRequestError,
     ProviderTimeoutError,
     run_interruptible,
     sniff_image_media_type,
@@ -229,6 +230,13 @@ class AnthropicClient(LLMClient):
         except a.AuthenticationError as e:
             raise ProviderConnectionError(
                 "Anthropic rejected the API key (401). Check LLM_API_KEY."
+            ) from e
+        except (a.BadRequestError, a.NotFoundError, a.PermissionDeniedError) as e:
+            # The API answered and refused. Retrying the identical request on
+            # the fallback model can't help, and letting the raw SDK error
+            # escape gives the user a traceback instead of the reason.
+            raise ProviderRequestError(
+                f"Anthropic rejected the request for {model}: {e}"
             ) from e
 
     def chat(

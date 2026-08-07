@@ -11,7 +11,7 @@ from core.cli import DIM, Spinner, _c
 from core.display import DisplayHooks, use_display
 from core.diffs import build_unified_diff, detect_line_ending, normalize_line_endings
 from core.interrupts import interrupt_context
-from core.app_runtime_config import get_app_runtime_config
+from core.app_runtime_config import get_app_runtime_config, tools_enabled
 from core.paths import get_data_dir, get_repo_root, set_workspace_root
 from ollama_client import (
     OllamaClient,
@@ -606,23 +606,42 @@ class Agent:
             "Tell the user to use the visible controls or /lumabot help."
         )
 
+    @staticmethod
+    def _no_tools_system_prompt():
+        return (
+            "You are Lumi, a helpful assistant.\n\n"
+            "Tool use is currently turned OFF, so you have no tools this turn. "
+            "Do not claim to read files, run commands, browse, or remember "
+            "anything — you cannot. Answer from the conversation and your own "
+            "knowledge, and if something genuinely needs a tool, say so and "
+            "tell the user they can turn tool use back on with the tool button "
+            "in the composer (or /tooluse on).\n\n"
+            "It's okay to use slang and profanity sometimes and to speak like a good friend."
+        )
+
     def build_system_prompt(self, extra_instructions=None, context_instructions=None):
         extra = (extra_instructions or "").strip()
         context = (context_instructions or "").strip()
-        cache_key = (self.runtime_profile, extra, context)
+        # The tool switch changes the prompt wholesale, so it's part of the key
+        # — otherwise a flip would keep serving the previously cached prompt.
+        with_tools = tools_enabled()
+        cache_key = (self.runtime_profile, extra, context, with_tools)
         cached = self._system_prompt_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        prompt = (
-            self._lumabot_system_prompt()
-            if self.runtime_profile == "lumabot"
-            else (
-                self._lumabot_remote_system_prompt()
-                if self.runtime_profile == "lumabot_remote"
-                else self._system_prompt_prefix
+        if not with_tools:
+            prompt = self._no_tools_system_prompt()
+        else:
+            prompt = (
+                self._lumabot_system_prompt()
+                if self.runtime_profile == "lumabot"
+                else (
+                    self._lumabot_remote_system_prompt()
+                    if self.runtime_profile == "lumabot_remote"
+                    else self._system_prompt_prefix
+                )
             )
-        )
         if extra:
             prompt += (
                 "\n\nPersonality override for this Telegram user:\n"
@@ -643,7 +662,7 @@ class Agent:
     def build_system_message(self, extra_instructions=None, context_instructions=None):
         extra = (extra_instructions or "").strip()
         context = (context_instructions or "").strip()
-        cache_key = (self.runtime_profile, extra, context)
+        cache_key = (self.runtime_profile, extra, context, tools_enabled())
         cached = self._system_message_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
@@ -718,6 +737,11 @@ class Agent:
         return self.code_index.status()
 
     def get_tools_for_llm(self, groups=None):
+        # Master switch (composer tool button / /tooluse). Off means we send no
+        # tool definitions at all — the only way completion-only local models
+        # can be used, since they reject any request that carries tools.
+        if not tools_enabled():
+            return []
         effective_groups = self._active_tool_groups if groups is None else groups
         group_key = tuple(sorted(effective_groups or []))
         cache_key = (self.registry.version, group_key)

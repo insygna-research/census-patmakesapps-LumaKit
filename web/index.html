@@ -102,6 +102,28 @@
                     <input id="photo-input" class="photo-input" type="file" accept="image/*">
                     <button id="photo-btn" class="composer-btn photo-btn" type="button" title="Attach photo" aria-label="Attach photo">+</button>
                     <textarea id="input" class="composer-input" placeholder="Ask Lumi to inspect this repo, run commands, or automate a task..." rows="1"></textarea>
+                    <div class="tools-toggle">
+                        <button id="tools-btn" class="composer-btn tools-btn" type="button" title="Tool use" aria-label="Tool use" aria-haspopup="true" aria-expanded="false">
+                            <svg class="tools-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                        </button>
+                        <div id="tools-menu" class="tools-menu hidden" role="menu" aria-labelledby="tools-btn">
+                            <div class="tools-menu-title">Tool use</div>
+                            <button type="button" class="tools-menu-item" role="menuitemradio" aria-checked="true" data-tools="on">
+                                <span class="tools-menu-check" aria-hidden="true">✓</span>
+                                <span class="tools-menu-copy">
+                                    <strong>On</strong>
+                                    <small>Lumi can read files, run commands, and use every tool.</small>
+                                </span>
+                            </button>
+                            <button type="button" class="tools-menu-item" role="menuitemradio" aria-checked="false" data-tools="off">
+                                <span class="tools-menu-check" aria-hidden="true">✓</span>
+                                <span class="tools-menu-copy">
+                                    <strong>Off</strong>
+                                    <small>Plain chat. Use this for models with no tool support.</small>
+                                </span>
+                            </button>
+                        </div>
+                    </div>
                     <button id="send-btn" class="composer-btn send-btn" title="Send (type /stop to interrupt)" aria-label="Send">
                         <svg class="send-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
                     </button>

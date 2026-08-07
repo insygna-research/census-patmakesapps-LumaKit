@@ -16,7 +16,12 @@ from core.chat_store import (
     set_active_chat,
     set_chat_lumabot_profile,
 )
-from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
+from core.app_runtime_config import (
+    get_app_runtime_config,
+    save_app_runtime_config,
+    set_tools_enabled,
+    tools_enabled,
+)
 from core.identity import CLI_USER_ID
 from core.runtime_config import apply_user_runtime
 from core.cli import BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, _c, render_storage_meter
@@ -38,6 +43,7 @@ def handle_command(command: str, agent, session: dict) -> bool:
         "/config": cmd_config,
         "/clear": cmd_clear,
         "/lumabot": cmd_lumabot,
+        "/tooluse": cmd_tooluse,
     }
 
     handler = handlers.get(cmd)
@@ -65,6 +71,7 @@ def cmd_help(args: str, agent, session: dict):
   {_c(CYAN, '/config')}               View current configuration
   {_c(CYAN, '/config set <k> <v>')}   Update a config value
   {_c(CYAN, '/clear')}                Clear the screen
+  {_c(CYAN, '/tooluse [on|off]')}     Turn tool calling on or off
   {_c(CYAN, '/lumabot agent')}        Natural-language robot control
   {_c(CYAN, '/lumabot remote')}       Instant structured robot controls
   {_c(CYAN, '/lumabot off')}          Restore full LumaKit
@@ -282,6 +289,33 @@ def _get_defaults(agent) -> dict:
         "auto_save_chats": True,
         "require_tool_approvals": bool(get_app_runtime_config().get("require_tool_approvals", True)),
     }
+
+
+def cmd_tooluse(args: str, agent, session: dict):
+    """Master tool-calling switch. Shared with the web composer and Telegram."""
+    current = tools_enabled()
+    value = args.strip().lower()
+
+    if not value:
+        state = _c(GREEN, "on") if current else _c(YELLOW, "off")
+        print(f"\n  Tool use is {state}.")
+        print(_c(DIM, "  Off means Lumi gets no tools at all — plain chat only."))
+        print(_c(DIM, "  Needed for models with no tool support (see `ollama show <model>`)."))
+        print(_c(DIM, "  Usage: /tooluse on|off\n"))
+        return
+
+    if value not in {"on", "off"}:
+        print(_c(RED, "  Usage: /tooluse on|off"))
+        return
+
+    set_tools_enabled(value == "on")
+    # The system prompt changes with the switch; refresh it now so the next
+    # message doesn't go out describing tools Lumi no longer has.
+    apply_user_runtime(agent, session, CLI_USER_ID, surface="cli")
+    if value == "on":
+        print(_c(GREEN, "  Tool use is on."))
+    else:
+        print(_c(YELLOW, "  Tool use is off. Lumi will answer without tools."))
 
 
 def cmd_clear(args: str, agent, session: dict):

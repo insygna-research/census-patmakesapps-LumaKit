@@ -117,6 +117,48 @@ class OllamaInterruptedError(Exception):
     """Raised when the user interrupts an in-flight Ollama request."""
 
 
+class OllamaRequestError(OllamaConnectionError):
+    """Ollama answered and refused the request (HTTP 4xx).
+
+    Subclasses OllamaConnectionError purely so the existing
+    ``except OllamaConnectionError`` handlers on every surface keep reporting
+    it. Semantically it is the opposite of a connection failure: the server is
+    up, it just said no. Retrying the identical request on the fallback model
+    cannot help, so this never triggers a fallback — a model without tool
+    support used to surface as "cannot reach Ollama", which sent people
+    hunting for a daemon that was running fine.
+    """
+
+
+def http_error_detail(exc) -> str:
+    """Best-effort human-readable message out of an Ollama error response."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except (ValueError, AttributeError):
+        payload = None
+    if isinstance(payload, dict):
+        detail = str(payload.get("error") or "").strip()
+        if detail:
+            return detail
+    try:
+        return (response.text or "").strip()[:300]
+    except (AttributeError, UnicodeDecodeError):
+        return ""
+
+
+# Ollama's wording when a model's template declares no tool support. Worth
+# a pointed hint because the fix isn't obvious from the raw error.
+_NO_TOOL_SUPPORT_HINT = (
+    " That model has no tool-calling support (check with `ollama show <model>` — "
+    "look for 'tools' under Capabilities). Either pick a tool-capable model, or "
+    "turn tool use off with the tool button in the composer (/tooluse off on CLI "
+    "and Telegram)."
+)
+
+
 class OllamaClient:
     CLOUD_MODEL_MIN_TIMEOUT = 240
 
@@ -246,6 +288,39 @@ class OllamaClient:
                 on_chunk=chunk_callback,
             )
             return result, model
+        except requests.HTTPError as e:
+            # requests.HTTPError subclasses IOError, so without this clause an
+            # HTTP status error falls into the OSError branch below and gets
+            # treated as "Ollama is unreachable" — silently retried on the
+            # fallback model with the real reason thrown away.
+            status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+            detail = http_error_detail(e)
+            if 400 <= status < 500:
+                message = f"Ollama rejected the request for {model} (HTTP {status})"
+                if detail:
+                    message += f": {detail}"
+                if "does not support tools" in detail.lower():
+                    message += _NO_TOOL_SUPPORT_HINT
+                raise OllamaRequestError(message) from e
+            # 5xx is a server-side hiccup, not a rejection — the fallback model
+            # may well succeed, so keep the historical retry.
+            suffix = f": {detail}" if detail else "."
+            if emitted_chunks or not self.fallback_model or self.fallback_model == model:
+                raise OllamaConnectionError(
+                    f"Ollama returned HTTP {status} for {model}{suffix}"
+                ) from e
+            try:
+                result = self._post(
+                    self.fallback_model, messages, tools, stream, options,
+                    request_timeout=request_timeout,
+                    on_chunk=on_chunk,
+                )
+                return result, self.fallback_model
+            except requests.RequestException as fallback_error:
+                raise OllamaConnectionError(
+                    f"Ollama returned HTTP {status} for primary ({model}) and the "
+                    f"fallback ({self.fallback_model}) failed too{suffix}"
+                ) from fallback_error
         except requests.Timeout as e:
             if emitted_chunks:
                 raise OllamaTimeoutError(

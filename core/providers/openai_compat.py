@@ -19,7 +19,9 @@ import requests
 from core.providers.base import (
     LLMClient,
     ProviderConnectionError,
+    ProviderRequestError,
     ProviderTimeoutError,
+    http_error_detail,
     run_interruptible,
     sniff_image_media_type,
     strip_internal_keys,
@@ -166,6 +168,30 @@ class OpenAICompatClient(LLMClient):
     def _post_with_fallback(self, model, messages, tools, options, timeout):
         try:
             return self._post_once(model, messages, tools, options, timeout), model
+        except requests.HTTPError as e:
+            # requests.HTTPError subclasses IOError, so without this clause a
+            # 4xx would fall into the OSError branch below and be reported as
+            # "cannot reach the provider" — then silently retried on the
+            # fallback model, which will be rejected for the same reason.
+            status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+            detail = http_error_detail(e)
+            if 400 <= status < 500:
+                raise ProviderRequestError(
+                    f"{self.name} rejected the request for {model} (HTTP {status})"
+                    + (f": {detail}" if detail else ".")
+                ) from e
+            if not self.fallback_model or self.fallback_model == model:
+                raise ProviderConnectionError(
+                    f"{self.name} returned HTTP {status} for {model}."
+                ) from e
+            try:
+                result = self._post_once(self.fallback_model, messages, tools, options, timeout)
+                return result, self.fallback_model
+            except requests.RequestException as fe:
+                raise ProviderConnectionError(
+                    f"{self.name} returned HTTP {status} for primary ({model}) and the "
+                    f"fallback ({self.fallback_model}) failed too."
+                ) from fe
         except requests.Timeout as e:
             if not self.fallback_model or self.fallback_model == model:
                 raise ProviderTimeoutError(

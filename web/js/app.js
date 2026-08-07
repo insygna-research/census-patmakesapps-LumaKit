@@ -16,6 +16,8 @@ const $sendBtn = document.getElementById('send-btn');
 const $photoInput = document.getElementById('photo-input');
 const $photoBtn = document.getElementById('photo-btn');
 const $photoPreview = document.getElementById('photo-preview');
+const $toolsBtn = document.getElementById('tools-btn');
+const $toolsMenu = document.getElementById('tools-menu');
 const $chatList = document.getElementById('chat-list');
 const $newChatBtn = document.getElementById('new-chat-btn');
 const $topbarTitle = document.getElementById('topbar-title');
@@ -1810,6 +1812,7 @@ async function loadSettings() {
         const settings = await res.json();
         settingsState = settings;
         requiresModelSetup = !!settings.setup_required;
+        setToolsToggleState(settings.tools_enabled !== false);
 
         const modelOptions = (settings.installed_models || [])
             .map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
@@ -2699,6 +2702,83 @@ function clearAttachedPhoto() {
     if ($photoInput) $photoInput.value = '';
     renderAttachedPhoto();
 }
+
+// --- Tool-use toggle ---
+// One server-side setting shared with the CLI and Telegram (/tooluse), so the
+// composer button is a view onto it, not its own per-tab state. Applies from
+// the next turn on — the running turn already sent its tool definitions.
+let toolsEnabled = true;
+
+function setToolsToggleState(enabled) {
+    toolsEnabled = !!enabled;
+    if (!$toolsBtn) return;
+    $toolsBtn.classList.toggle('tools-off', !toolsEnabled);
+    $toolsBtn.title = toolsEnabled
+        ? 'Tool use is on'
+        : 'Tool use is off — Lumi can only chat';
+    $toolsBtn.setAttribute('aria-label', $toolsBtn.title);
+    $toolsMenu?.querySelectorAll('.tools-menu-item').forEach(item => {
+        item.setAttribute('aria-checked', String((item.dataset.tools === 'on') === toolsEnabled));
+    });
+}
+
+function closeToolsMenu() {
+    $toolsMenu?.classList.add('hidden');
+    $toolsBtn?.classList.remove('is-open');
+    $toolsBtn?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleToolsMenu() {
+    if (!$toolsMenu) return;
+    const opening = $toolsMenu.classList.contains('hidden');
+    $toolsMenu.classList.toggle('hidden', !opening);
+    $toolsBtn?.classList.toggle('is-open', opening);
+    $toolsBtn?.setAttribute('aria-expanded', String(opening));
+}
+
+async function applyToolsEnabled(enabled) {
+    closeToolsMenu();
+    if (enabled === toolsEnabled) return;
+    const previous = toolsEnabled;
+    setToolsToggleState(enabled);
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tools_enabled: enabled }),
+        });
+        if (!res.ok) throw new Error(`Settings API returned ${res.status}`);
+        const settings = await res.json();
+        settingsState = settings;
+        setToolsToggleState(settings.tools_enabled !== false);
+        showStatus(toolsEnabled
+            ? 'Tool use is on.'
+            : 'Tool use is off — Lumi will chat without tools.');
+    } catch (e) {
+        console.error('Failed to change tool use', e);
+        setToolsToggleState(previous);
+        showStatus('Could not change the tool-use setting.');
+    }
+}
+
+$toolsBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleToolsMenu();
+});
+
+$toolsMenu?.querySelectorAll('.tools-menu-item').forEach(item => {
+    item.addEventListener('click', () => applyToolsEnabled(item.dataset.tools === 'on'));
+});
+
+document.addEventListener('click', (e) => {
+    if (!$toolsMenu || $toolsMenu.classList.contains('hidden')) return;
+    if ($toolsMenu.contains(e.target) || $toolsBtn?.contains(e.target)) return;
+    closeToolsMenu();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeToolsMenu();
+});
 
 // --- Send message ---
 // Users can send multiple messages in a row without waiting for a response.

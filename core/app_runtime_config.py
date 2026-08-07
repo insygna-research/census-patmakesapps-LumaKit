@@ -17,6 +17,11 @@ DEFAULT_CONFIG = {
     "primary_model": "",
     "fallback_model": "",
     "require_tool_approvals": True,
+    # Master switch for tool calling. On by default — LumaKit is an agent.
+    # Turning it off sends no tool definitions to the model at all, which is
+    # what makes completion-only local models (dolphin3 and friends, which
+    # reject any request carrying tools) usable for plain chat.
+    "tools_enabled": True,
     # Safe mode keeps the always-confirm tool prompts and the workspace
     # filesystem sandbox. Owner can disable it (/safemode off) for full
     # machine access; the secrets denylist still applies.
@@ -80,6 +85,7 @@ def load_app_runtime_config():
                     data.get("require_tool_approvals"),
                     True,
                 ),
+                "tools_enabled": _coerce_bool(data.get("tools_enabled"), True),
                 "safe_mode": _coerce_bool(data.get("safe_mode"), True),
                 "llm_provider": _coerce_provider(data.get("llm_provider")),
                 "provider_models": _coerce_provider_models(data.get("provider_models")),
@@ -98,6 +104,19 @@ def get_app_runtime_config():
     return APP_RUNTIME_CONFIG
 
 
+def tools_enabled() -> bool:
+    """Whether the model is allowed to call tools at all. On by default."""
+    return _coerce_bool(APP_RUNTIME_CONFIG.get("tools_enabled"), True)
+
+
+def set_tools_enabled(enabled: bool) -> bool:
+    """Flip the master tool switch. Every surface shares this one setting."""
+    config = APP_RUNTIME_CONFIG.copy()
+    config["tools_enabled"] = bool(enabled)
+    save_app_runtime_config(config)
+    return tools_enabled()
+
+
 def save_app_runtime_config(config):
     global APP_RUNTIME_CONFIG
 
@@ -109,6 +128,7 @@ def save_app_runtime_config(config):
         payload.get("require_tool_approvals"),
         True,
     )
+    payload["tools_enabled"] = _coerce_bool(payload.get("tools_enabled"), True)
     payload["safe_mode"] = _coerce_bool(payload.get("safe_mode"), True)
     payload["llm_provider"] = _coerce_provider(payload.get("llm_provider"))
     payload["provider_models"] = _coerce_provider_models(payload.get("provider_models"))

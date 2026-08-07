@@ -26,14 +26,18 @@ from abc import ABC, abstractmethod
 from ollama_client import (
     OllamaConnectionError as ProviderConnectionError,
     OllamaInterruptedError as ProviderInterruptedError,
+    OllamaRequestError as ProviderRequestError,
     OllamaTimeoutError as ProviderTimeoutError,
+    http_error_detail,
 )
 
 __all__ = [
     "LLMClient",
     "ProviderConnectionError",
     "ProviderInterruptedError",
+    "ProviderRequestError",
     "ProviderTimeoutError",
+    "http_error_detail",
     "run_interruptible",
     "strip_internal_keys",
     "sniff_image_media_type",

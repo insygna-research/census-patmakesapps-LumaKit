@@ -7,8 +7,9 @@ import pytest
 
 from core import providers
 from core.providers.anthropic_provider import AnthropicClient
+from core.providers.base import ProviderRequestError
 from core.providers.openai_compat import OpenAICompatClient
-from ollama_client import OllamaClient
+from ollama_client import OllamaClient, OllamaRequestError
 
 INTERNAL_MESSAGES = [
     {"role": "system", "content": "You are Lumi.", "created_at": "2026-01-01"},
@@ -192,6 +193,65 @@ def test_openai_fallback_on_timeout():
         out = client.chat("gpt-main", [{"role": "user", "content": "hi"}])
         assert out["message"]["content"] == "fb reply"
         assert client.last_model_used == "gpt-fallback"
+
+
+def _http_error(status, body):
+    """A requests.HTTPError shaped like a real one (response attached)."""
+    import requests as _requests
+
+    response = mock.Mock(status_code=status)
+    response.json.return_value = body
+    response.text = json.dumps(body)
+    return _requests.HTTPError(response=response)
+
+
+def test_ollama_4xx_does_not_fall_back():
+    """A rejected request is not a connection failure.
+
+    requests.HTTPError subclasses IOError, so a 400 used to land in the
+    OSError branch and get silently retried on the fallback model — which is
+    how "dolphin3 does not support tools" surfaced as "cannot reach Ollama".
+    """
+    client = OllamaClient(fallback_model="gemma4:31b-cloud")
+    with mock.patch("ollama_client.requests.post") as post:
+        post.side_effect = _http_error(
+            400, {"error": "registry.ollama.ai/library/dolphin3:latest does not support tools"}
+        )
+        with pytest.raises(OllamaRequestError) as excinfo:
+            client.chat("dolphin3", [{"role": "user", "content": "hi"}])
+    assert post.call_count == 1  # never retried on the fallback
+    message = str(excinfo.value)
+    assert "does not support tools" in message
+    assert "ollama show" in message  # actionable hint, not a generic failure
+    assert client.last_model_used is None
+
+
+def test_ollama_5xx_still_falls_back():
+    """A server-side error is transient — the fallback is still worth a try."""
+    client = OllamaClient(fallback_model="gemma4:31b-cloud")
+    with mock.patch("ollama_client.requests.post") as post:
+        ok = mock.Mock(status_code=200)
+        ok.json.return_value = {"message": {"role": "assistant", "content": "fb reply"}}
+        ok.raise_for_status.return_value = None
+        post.side_effect = [_http_error(503, {"error": "overloaded"}), ok]
+        out = client.chat("dolphin3", [{"role": "user", "content": "hi"}])
+    assert out["message"]["content"] == "fb reply"
+    assert client.last_model_used == "gemma4:31b-cloud"
+
+
+def test_openai_4xx_does_not_fall_back():
+    client = OpenAICompatClient(
+        "https://api.openai.com/v1", api_key="k", fallback_model="gpt-fallback"
+    )
+    with mock.patch("core.providers.openai_compat.requests.post") as post:
+        resp = mock.Mock(status_code=400)
+        resp.json.return_value = {"error": {"message": "unsupported"}}
+        resp.text = '{"error": "unsupported"}'
+        resp.raise_for_status.side_effect = _http_error(400, {"error": "unsupported"})
+        post.return_value = resp
+        with pytest.raises(ProviderRequestError):
+            client.chat("gpt-main", [{"role": "user", "content": "hi"}])
+    assert post.call_count == 1
 
 
 def test_anthropic_message_conversion():

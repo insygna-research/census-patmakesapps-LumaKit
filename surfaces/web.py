@@ -421,6 +421,7 @@ def _settings_payload():
         "model_source": primary_source,
         "fallback_model_source": fallback_source,
         "require_tool_approvals": bool(app_cfg.get("require_tool_approvals", True)),
+        "tools_enabled": bool(app_cfg.get("tools_enabled", True)),
         "data_dir": str(get_data_dir()),
         "app_primary_model": app_cfg.get("primary_model", ""),
         "app_fallback_model": app_cfg.get("fallback_model", ""),
@@ -635,6 +636,9 @@ async def api_update_settings(payload: dict):
         "require_tool_approvals",
         app_cfg.get("require_tool_approvals", True),
     )
+    # Master tool switch (composer button). Unlike approvals, turning this OFF
+    # only makes Lumi less capable, never less safe — no confirmation gate.
+    tools_enabled = payload.get("tools_enabled", app_cfg.get("tools_enabled", True))
 
     # Turning approvals OFF weakens a security control — require an explicit
     # second acknowledgement flag so it can't happen from a casual/accidental
@@ -699,6 +703,7 @@ async def api_update_settings(payload: dict):
             "primary_model": primary_model,
             "fallback_model": fallback_model,
             "require_tool_approvals": require_tool_approvals,
+            "tools_enabled": tools_enabled,
             "llm_provider": llm_provider,
             "provider_models": provider_models,
             "provider_fallback_models": provider_fallbacks,

@@ -15,7 +15,12 @@ from core.chat_store import (
     set_active_chat,
     set_chat_lumabot_profile,
 )
-from core.app_runtime_config import get_app_runtime_config, save_app_runtime_config
+from core.app_runtime_config import (
+    get_app_runtime_config,
+    save_app_runtime_config,
+    set_tools_enabled,
+    tools_enabled,
+)
 from core.identity import chat_owner_id
 from core.runtime_config import apply_user_runtime, get_owner_effective_config
 from core.telegram_io import poll_for_reply, send_message
@@ -297,6 +302,36 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
         send_message(f"Tool visibility: {'on' if not current else 'off'}")
         return True
 
+    if cmd == "/tooluse":
+        if str(chat_id) != str(OWNER_ID):
+            send_message("This command is owner-only.")
+            return True
+        current = tools_enabled()
+        value = args.strip().lower()
+        if not value:
+            send_message(
+                f"Tool use is currently {'ON' if current else 'OFF'}.\n\n"
+                "ON: Lumi can read files, run commands, and use every tool.\n"
+                "OFF: plain chat — no tool definitions are sent to the model at "
+                "all. This is what makes a model without tool support usable "
+                "(check yours with `ollama show <model>`).\n\n"
+                "Usage: /tooluse on|off"
+            )
+            return True
+        if value not in {"on", "off"}:
+            send_message("Usage: /tooluse on|off")
+            return True
+        set_tools_enabled(value == "on")
+        # The system prompt differs with tools off — refresh it now instead of
+        # telling the model about tools it no longer has.
+        apply_user_runtime(agent, session, chat_id, surface="telegram")
+        send_message(
+            "Tool use is on."
+            if value == "on"
+            else "Tool use is off. Lumi will answer without tools."
+        )
+        return True
+
     if cmd in {"/permissions", "/approvals"}:
         if str(chat_id) != str(OWNER_ID):
             send_message("This command is owner-only.")
@@ -346,6 +381,7 @@ def handle_telegram_command(text, agent, session, chat_id, speech_client):
             lines.append("/model - choose the owner's Telegram model settings")
             lines.append("/workspace - pick or set the working directory (alias /dir)")
             lines.append("/safemode - toggle full machine access (approvals + file sandbox)")
+            lines.append("/tooluse on|off - let Lumi use tools at all (on by default)")
             lines.append("/lumabot - agent or instant remote control")
             lines.append("/users - list authorized users")
         lines.append("/personality - view or change your Telegram personality override")
